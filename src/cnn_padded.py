@@ -18,60 +18,82 @@ x = tf.random.normal((B, H, W, 1))
 
 # -----------------------------
 # Original filter + bias
-# Conv along H only -> kernel (K,1)
 # -----------------------------
 filterVal = tf.random.normal((K, 1, 1, Cout))
 biasVal = tf.random.normal((Cout,))
 
 # -----------------------------
-# Original convolution
-# -----------------------------
-y_orig = tf.nn.conv2d(
-    x,
-    filterVal,
-    strides=[1, 1, 1, 1],
-    padding="VALID",
-    data_format="NHWC"
-)
-y_orig = tf.nn.bias_add(y_orig, biasVal)
-
-# -----------------------------
 # Width folding: W -> W/F, Cin -> F
 # -----------------------------
-# (B, H, W, 1) -> (B, H, W/F, F)
 x_folded = tf.reshape(x, (B, H, W // F, F))
 
 # -----------------------------
-# Build diagonal filter
-# (K,1,1,Cout) -> (K,1,F,F*Cout)
+# Build diagonal folded filter
 # -----------------------------
 filterValNew = np.zeros((K, 1, F, F * Cout), dtype=np.float32)
-
 for f in range(F):
-    filterValNew[:, :, f, f*Cout:(f+1)*Cout] = np.squeeze(filterVal.numpy(),axis=-1)
+    filterValNew[:, :, f, f*Cout:(f+1)*Cout] = np.squeeze(filterVal.numpy(), axis=-1)
 
 filterValNew = tf.constant(filterValNew)
-
-# -----------------------------
-# Bias replication
-# -----------------------------
 biasValNew = tf.tile(biasVal, [F])
 
+# =====================================================
+# Timed kernels
+# =====================================================
+
+@tf.function
+def conv_original(x, w, b):
+    y = tf.nn.conv2d(
+        x, w,
+        strides=[1, 1, 1, 1],
+        padding="VALID",
+        data_format="NHWC"
+    )
+    return tf.nn.bias_add(y, b)
+
+@tf.function
+def conv_folded(x, w, b):
+    y = tf.nn.conv2d(
+        x, w,
+        strides=[1, 1, 1, 1],
+        padding="VALID",
+        data_format="NHWC"
+    )
+    return tf.nn.bias_add(y, b)
+
 # -----------------------------
-# Folded convolution
+# Warm-up (important)
 # -----------------------------
-y_folded = tf.nn.conv2d(
-    x_folded,
-    filterValNew,
-    strides=[1, 1, 1, 1],   # stride only along H
-    padding="VALID",
-    data_format="NHWC"
-)
-y_folded = tf.nn.bias_add(y_folded, biasValNew)
+for _ in range(10):
+    _ = conv_original(x, filterVal, biasVal)
+    _ = conv_folded(x_folded, filterValNew, biasValNew)
+
+
+# -----------------------------
+# Timing
+# -----------------------------
+num_iters = 100
+
+# Original convolution timing
+start = tf.timestamp()
+for _ in range(num_iters):
+    y_orig = conv_original(x, filterVal, biasVal)
+_ = y_orig.numpy()  # <-- GPU sync barrier
+end = tf.timestamp()
+
+orig_time_ms = (end - start) * 1000 / num_iters
+
+# Folded convolution timing
+start = tf.timestamp()
+for _ in range(num_iters):
+    y_folded = conv_folded(x_folded, filterValNew, biasValNew)
+_ = y_folded.numpy()  # <-- GPU sync barrier
+end = tf.timestamp()
+
+folded_time_ms = (end - start) * 1000 / num_iters
 
 # -----------------------------
 # Reconstruct original layout
-# (B, H', W/F, F) -> (B, H', W)
 # -----------------------------
 y_reconstructed = tf.reshape(
     y_folded,
@@ -81,10 +103,20 @@ y_reconstructed = tf.reshape(
 # -----------------------------
 # Verification
 # -----------------------------
-max_error = tf.reduce_max(tf.abs(np.squeeze(y_orig, axis=-1) - y_reconstructed))
+max_error = tf.reduce_max(
+    tf.abs(tf.squeeze(y_orig, axis=-1) - y_reconstructed)
+)
+
+print(f"Original conv: {orig_time_ms.numpy():.4f} ms")
+print(f"Folded conv:   {folded_time_ms.numpy():.4f} ms")
+print("Speedup:", orig_time_ms.numpy() / folded_time_ms.numpy())
 print("Max absolute error:", max_error.numpy())
 
-# Assert correctness
-tf.debugging.assert_near(np.squeeze(y_orig, axis=-1), y_reconstructed, atol=1e-5)
+tf.debugging.assert_near(
+    tf.squeeze(y_orig, axis=-1),
+    y_reconstructed,
+    atol=1e-5
+)
+
 print("✔ Width folding transformation is numerically correct")
 
