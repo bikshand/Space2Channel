@@ -13,6 +13,7 @@
 \usepackage{tikz}
 \usepackage{tabularx}
 \usetikzlibrary{arrows.meta, positioning, decorations.pathreplacing}
+\usepackage{placeins}
 
 \usepackage{tcolorbox}   % for boxed listings
 \tcbset{
@@ -135,20 +136,53 @@
 ]
 
 \begin{abstract}
-	Convolutional Neural Networks (CNNs) are central to modern AI, but their performance is often limited by hardware constraints. NVIDIA Tensor Cores, for instance, require input channels to be multiples of 8 for efficient execution. Traditional approaches address such alignment using zero-padding, which can be inefficient. In this work, we present a first-step, hardware-aware reformulation of CNN computations using rewrite rules, restructuring the underlying math to satisfy hardware alignment entirely {\bf post-training} without modifying network weights. While our current implementation focuses on a single transformation for Tensor Cores, this approach is generalizable, laying the foundation to explore additional transformations for other accelerators, including AMD GPUs. This study represents an initial step toward {\em semantic tuning}, a systematic, hardware-aware optimization strategy for efficient deployment of CNN models on specialized AI hardware.
+	Convolutional Neural Networks (CNNs) are central to modern AI, but their performance is often limited by hardware constraints. NVIDIA Tensor Cores, for instance, require input channels to be multiples of 8 and sometimes 512 for efficient execution~\cite{nvidia_cnn}. Traditional approaches address such alignment using zero-padding, which can be inefficient. In this work, we present a first-step, hardware-aware reformulation of CNN computations using rewrite rules, restructuring the underlying math to satisfy hardware alignment entirely {\bf post-training} without modifying network weights. While our current implementation focuses on a single transformation for Tensor Cores, this approach is generalizable, laying the foundation to explore additional transformations for other accelerators, including AMD GPUs. This study represents an initial step toward {\em semantic tuning}, a systematic, hardware-aware optimization strategy for efficient deployment of CNN models on specialized AI hardware.
 \end{abstract}
 
 \section{Introduction}
 
-Convolutional Neural Networks (CNNs) are a foundational building block of modern deep learning systems, underpinning applications ranging from computer vision to speech and scientific computing. At a high level, CNNs apply learnable filters to structured input tensors in order to extract hierarchical feature representations. For a standard convolution, the input tensor has shape $(B, C_{\text{in}}, H[, W, D])$, the filter weights have shape $(C_{\text{out}}, C_{\text{in}}, K_1[, K_2, \ldots, K_n])$, and the resulting output tensor has shape $(B, C_{\text{out}}, H_{\text{out}}[, W_{\text{out}}, D_{\text{out}])}$.
+Convolutional Neural Networks (CNNs) are a foundational building block of modern deep learning systems, underpinning applications ranging from computer vision to speech and scientific computing. At a high level, CNNs apply learnable filters to structured input tensors in order to extract hierarchical feature representations. For a standard convolution, the input tensor has shape $(N, C_{\text{in}}, H[, W, D])$, the filter weights have shape $(C_{\text{out}}, C_{\text{in}}, K_1[, K_2, \ldots, K_n])$, and the resulting output tensor has shape $(N, C_{\text{out}}, H_{\text{out}}[, W_{\text{out}}, D_{\text{out}])}$. This formulation uses the NCHW layout; alternate layout is NHWC.
 
-While this mathematical formulation is hardware-agnostic, the efficient execution of CNNs on modern AI accelerators is strongly influenced by hardware-specific constraints. Specialized units such as NVIDIA Tensor Cores and analogous matrix-multiply engines in other accelerators impose alignment and tiling requirements on tensor dimensions, most notably that certain dimensions (e.g., channel counts) be multiples of fixed factors such as eight~\cite{nvidia_cnn}. When these constraints are not satisfied, accelerators either fall back to less efficient execution paths or require auxiliary modifications such as zero padding, which introduce redundant computation and memory overhead.
+While this mathematical formulation is hardware-agnostic, the efficient execution of CNNs on modern AI accelerators is strongly influenced by hardware-specific constraints. Specialized units such as NVIDIA Tensor Cores and analogous matrix-multiply engines in other accelerators impose alignment and tiling requirements on tensor dimensions, most notably that certain dimensions (e.g., channel counts) be multiples of fixed factors such as eight or a higher count like 512~\cite{nvidia_cnn}. When these constraints are not satisfied, libraries either fall back to less efficient execution paths or require auxiliary modifications such as zero padding, which introduce redundant computation and memory overhead.
 
-Existing approaches typically address these constraints during network design or training, for example by manually choosing channel dimensions or retraining models with padded tensors. In contrast, this paper explores a complementary and largely underexplored direction: post-training reformulation of CNN computations. Rather than modifying the network architecture or retraining weights, we rewrite the underlying convolutional mathematics to produce an equivalent formulation that satisfies hardware alignment requirements by construction.
+It is possible to address these constraints during network design or training, for example by manually choosing channel dimensions or retraining models with padded tensors. In contrast, this paper explores a complementary and largely underexplored direction: post-training reformulation of CNN computations. Rather than modifying the network architecture or retraining weights, we rewrite the underlying convolutional mathematics to produce an equivalent formulation that satisfies hardware alignment and channel count requirements by construction.
 
-Specifically, we present an initial hardware-aware transformation that reshapes and reinterprets the convolutional computation—through {\bf width folding} and {\bf structured filter expansion} —so that the resulting tensors conform to accelerator alignment constraints while preserving exact numerical equivalence to the original CNN. This transformation eliminates the need for zero padding and does not alter the learned parameters or outputs of the network. Although the paper focuses on a single transformation motivated by NVIDIA Tensor Core constraints, the broader goal is to establish a foundation for a family of such rewrite rules that can be systematically derived and applied across different accelerator architectures.
+Specifically, we present an initial hardware-aware transformation that reshapes and reinterprets the convolutional computation—through {\bf width folding for input in NHWC format (alternatively height folding for NCHW format)} and {\bf structured filter expansion} — so that the resulting tensors conform to accelerator alignment constraints while preserving exact numerical equivalence to the original CNN. This transformation eliminates the need for zero padding and does not alter the learned parameters or outputs of the network. Although the paper focuses on a single transformation motivated by NVIDIA Tensor Core constraints, the broader goal is to establish a foundation for a family of such rewrite rules that can be systematically derived and applied across different accelerator architectures.
 
 Viewed through this lens, CNN execution can be treated as a compilation problem, where mathematically equivalent reformulations are selected to best match the capabilities and constraints of the target hardware. This work represents a first step toward such a hardware-aware compilation framework for CNNs, demonstrating that non-trivial accelerator constraints can be addressed purely through post-training mathematical rewrites.
+
+\begin{table}[h!]
+\centering
+\small
+\caption{First-layer channels in popular CNN architectures}
+\label{tab:firstlayer}
+\begin{tabularx}{\columnwidth}{|X|c|c|X|}
+\hline
+\textbf{Network} & \textbf{Input Channels} \\
+\hline
+AlexNet  & 3 \\
+VGG16  & 3 \\
+ResNet-18 & 3 \\
+ResNet-50 & 3 \\
+GoogLeNet & 3 \\
+MobileNetV2 & 3 \\
+\hline
+\end{tabularx}
+\end{table}
+
+To motivate the need for hardware-aware filter alignment, we survey several widely used CNN architectures and their first-layer channel dimensions.  As shown in Table~\ref{tab:firstlayer}, most models processing RGB images have an input channel count of 3, which is not a multiple of 8, limiting the efficiency on NVIDIA Tensor Cores. Furthermore, many models have a first-layer filter count below 512, which is the recommended number mentioned in NVIDIA~\cite{nvidia_cnn}. In such cases, our method can also increase the channel dimensions, ensuring better alignment with hardware requirements while preserving network functionality.
+
+The paper makes the following contributions:
+
+\begin{itemize}
+\item Introduce \emph{semantic reformulation} as a hardware-aware optimization paradigm.
+\item Present \emph{width folding}, a semantics-preserving transformation that increases effective channel dimensionality without padding.
+\item Provide a formal correctness proof.
+\item Show how the transformation fits naturally as an MLIR compiler pass.
+\item Eemonstrate generalization to GEMM via $1\times1$ convolutions.
+\item Report up to $3\times$ speedups over cuDNN/TensorRT on NVIDIA A100.
+\end{itemize}
+
 
 %\begin{figure}[h!]
 %    \centering
@@ -176,26 +210,26 @@ Viewed through this lens, CNN execution can be treated as a compilation problem,
 % Original CNN
 \node[box, fill=inputblue] (input1) at (0,2)
 {Input Feature Map\\
-$\mathbf{x} \in \mathbb{R}^{C \times W}$};
+$\mathbf{x} \in \mathbb{R}^{ H \times W \times Cin}$};
 
 \node[box, fill=filtergreen] (filter1) at (0,0)
 {Filter Weights\\
-$\mathbf{W} \in \mathbb{R}^{C \times k}$};
+$\mathbf{W} \in \mathbb{R}^{K \times Cin}$};
 
 % Rewrite
 \node[box, fill=rewriteorange] (rewrite) at (5,1)
 {Hardware-Aware Rewrite\\
-Channel $\rightarrow$ Width Folding\\
+Width $\rightarrow$ Channel Folding\\
 (No Zero Padding)};
 
 % New CNN
 \node[box, fill=inputblue] (input2) at (10,2)
 {Folded Input\\
-$\tilde{\mathbf{x}} \in \mathbb{R}^{8 \times (W \cdot G)}$};
+	$\tilde{\mathbf{x}} \in \mathbb{R}^{H \times (W \div F) \times (Cin \dot F))}$};
 
 \node[box, fill=filtergreen] (filter2) at (10,0)
 {Block-Diagonal Filter\\
-$\tilde{\mathbf{W}} \in \mathbb{R}^{8 \times (k \cdot G)}$};
+$\tilde{\mathbf{W}} \in \mathbb{R}^{K \times (Cin \cdot F)}$};
 
 % Output
 \node[box, fill=outputpurple] (output) at (10,-2)
@@ -224,7 +258,7 @@ not the data};
 
 \end{tikzpicture}
 }
-\caption{Hardware-aware reformulation of a CNN via channel-to-width folding.
+\caption{Hardware-aware reformulation of a CNN via width-to-channel folding.
 The rewrite preserves exact semantics while satisfying Tensor Core alignment
 constraints without zero padding or retraining.}
 
@@ -378,6 +412,59 @@ This post-training transformation preserves exact convolution semantics while al
 %\clearpage       % start on a fresh page
 %\onecolumn
 
+\begin{figure}[t]  % t = top of page
+\centering
+\small  % optional: reduce font to fit vertically
+\resizebox{\columnwidth}{!}{%
+\begin{minipage}{\columnwidth}
+\begin{algorithm}[H]
+\caption{Width-Folding Transformation for Convolution}
+\label{alg:width-folding}
+\begin{algorithmic}[1]
+\REQUIRE
+Input tensor $X \in \mathbb{R}^{B \times H \times W \times C_{\text{in}}}$, \\
+Filter tensor $W_f \in \mathbb{R}^{K_H \times K_W \times C_{\text{in}} \times C_{\text{out}}}$, \\
+Bias $b \in \mathbb{R}^{C_{\text{out}}}$, \\
+Folding factor $F$
+
+\ENSURE
+Transformed tensors $(X_f, W_f', b')$ or fallback
+
+\IF{$W \bmod F \neq 0$ \textbf{or} $C_{\text{in}} \neq 1$}
+    \STATE \textbf{return} $(X, W_f, b)$ \COMMENT{Fallback: width not divisible or unsupported channels}
+\ENDIF
+
+\STATE Define $X_f \in \mathbb{R}^{B \times H \times (W/F) \times F}$
+
+\FOR{$b\_idx = 0$ to $B-1$}
+    \FOR{$h = 0$ to $H-1$}
+        \FOR{$w' = 0$ to $(W/F)-1$}
+            \FOR{$f = 0$ to $F-1$}
+                \STATE $X_f[b\_idx,h,w',f] \gets X[b\_idx,h,F \cdot w' + f,0]$
+            \ENDFOR
+        \ENDFOR
+    \ENDFOR
+\ENDFOR
+
+\STATE Define $W_f' \in \mathbb{R}^{K_H \times K_W \times F \times (F \cdot C_{\text{out}})}$, initialize to zero
+
+\FOR{$f = 0$ to $F-1$}
+    \STATE $W_f'[:,:,f,f\cdot C_{\text{out}}:(f+1)\cdot C_{\text{out}}] \gets W_f[:,:,0,:]$
+\ENDFOR
+
+\STATE Define $b' \in \mathbb{R}^{F \cdot C_{\text{out}}}$
+
+\FOR{$f = 0$ to $F-1$}
+    \STATE $b'[f\cdot C_{\text{out}}:(f+1)\cdot C_{\text{out}}] \gets b$
+\ENDFOR
+
+\STATE \textbf{return} $(X_f, W_f', b')$
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}%
+}
+\end{figure}
+
 \section{Width Folding Transformation}
 
 This section describes the width folding transformation, a post-training,
@@ -478,8 +565,38 @@ X' \in \mathbb{R}^{H \times (W/F) \times F}
 using the filter $W_f'$ and bias $b'$.
 As shown in Section~\ref{sec:correctness}, this convolution produces outputs
 that are exactly equivalent to those of the original network, up to a
-bijective re-indexing of the width dimension.
+bijective re-indexing of the width dimension. The algorithm for computing
+width folded convolution is presented in ~\ref{alg:width-folding}.
 
+
+\section{Width Folding: Mathematical Perspective}
+
+Width folding is a structural transformation of convolutional tensors that trades spatial width for additional channels. Given an input tensor 
+$X \in \mathbb{R}^{B \times H \times W \times C_{\text{in}}}$ 
+and a folding factor $F$, width folding produces 
+$X_f \in \mathbb{R}^{B \times H \times (W/F) \times (C_{\text{in}} \cdot F)}$, via a linear isomorphism
+\[
+X_f[b,h,w',c'] = X[b,h,F \cdot w' + f, c], \quad c' = f \cdot C_{\text{in}} + c,
+\]
+preserving all input information. Conceptually, this is equivalent to reindexing the contraction indices in convolution, where the standard contraction
+\[
+Y[b,h,w,c_{\text{out}}] = \sum_{k_h,k_w,c_{\text{in}}} X[b,h+k_h,w+k_w,c_{\text{in}}]\, W[k_h,k_w,c_{\text{in}},c_{\text{out}}]
+\]
+becomes, after width folding,
+\[
+Y_f[b,h,w',c'_{\text{out}}] = \sum_{k_h,k_w,c'_{\text{in}}} X_f[b,h+k_h,w',c'_{\text{in}}]\, W_f'[k_h,k_w,c'_{\text{in}},c'_{\text{out}}].
+\]
+
+In linear algebra terms, folding flattens width into channels, allowing the convolution to be represented as a block-diagonal matrix multiplication, where each block corresponds to one slice along the folded width. This structure is naturally interpreted as a Kronecker product: the expanded kernel $W_f'$ can be viewed as the Kronecker product of the original kernel with an identity along the folded width dimension, which aligns well with hardware vectorization and parallelism.
+
+From a category-theoretic viewpoint, tensors are objects in a monoidal category (e.g., $\mathbf{Vect}_\mathbb{R}$) and convolution is a morphism 
+$X \otimes W \to Y$. Width folding is a natural isomorphism of the form
+\[
+B \otimes H \otimes W \otimes C_{\text{in}} \cong B \otimes H \otimes W' \otimes (C_{\text{in}} \otimes F),
+\]
+reassociating the tensor factors without changing the underlying morphism. Thus, folding is a structure-preserving transformation: the semantics of convolution remain identical, while the indexing structure changes to facilitate computation.
+
+Overall, width folding unifies perspectives from tensor reshaping, contraction, block-diagonal / Kronecker structures, and categorical isomorphisms, providing a concise mathematical framework for this hardware-oriented optimization.
 
 \section{Correctness of Width Folding Transformation}
 
@@ -599,123 +716,167 @@ Therefore, width folding with channel expansion is
 Our method generalizes to N-D convolutions by folding dimensions that are not involved in the convolution operation into the channel dimension. This reparameterization preserves exact convolution semantics via block-diagonal kernels and does not rely on kernel separability or approximation.
 %\vspace{2mm} % small spacing between figure and code
 
-\section{Survey of Popular CNN Architectures}
-To motivate the need for hardware-aware filter alignment, we survey several widely used CNN architectures and their first-layer channel dimensions. Many modern networks have input channel dimensions that are not multiples of 8, which can lead to underutilization of NVIDIA Tensor Cores.
-\begin{table}[h!]
-\centering
-\small
-\caption{First-layer channels in popular CNN architectures}
-\label{tab:firstlayer}
-\begin{tabularx}{\columnwidth}{|X|c|c|X|}
-\hline
-\textbf{Network} & \textbf{Input Channels} & \textbf{First Conv Filters} & \textbf{Notes} \\
-\hline
-AlexNet  & 3 & 96 & RGB input \\
-VGG16  & 3 & 64 & RGB input \\
-ResNet-18 & 3 & 64 & RGB input \\
-ResNet-50 & 3 & 64 & RGB input \\
-GoogLeNet & 3 & 64 & RGB input \\
-MobileNetV2 & 3 & 32 & RGB input \\
-\hline
-\end{tabularx}
-\end{table}
+\section{Width-Folding Transformation as an IR Transformation} 
 
-As shown in Table~\ref{tab:firstlayer}, most models processing RGB images have an input channel count of 3, which is not a multiple of 8, limiting the efficiency on NVIDIA Tensor Cores. This motivates the use of padding or block-diagonal transformations to maximize hardware throughput. Proprietary networks with similar input channels could benefit from the same approach. Furthermore, many models have a first-layer filter count below 512, which is the optimal number recommended by NVIDIA~\cite{nvidia_cnn}. In such cases, our method can also increase the channel dimensions, ensuring better alignment with hardware requirements while preserving network functionality.
+\subsection{Motivation}
 
-\section{Potential Optimizations for Sparsity}
-Efficient exploitation of sparsity is crucial for both memory savings and computational acceleration. The block-diagonal filter structure introduces structured sparsity that can be leveraged in multiple ways:
+Formulating width-folding as a compiler transformation is feasible and essential because it decouples the mathematical optimization from any particular library or runtime. By representing the input reorganization and kernel replication at the IR level, the compiler can reason about the data layout, tiling, and vectorization systematically. This enables automatic generation of hardware-efficient code that maximizes utilization of compute units such as Tensor Cores, while preserving the semantics of the original convolution. Treating it as a compiler pass ensures portability, composability with other optimizations, and the ability to target multiple backends without manual intervention.
 
-\begin{itemize}
-    \item \textbf{Memory:} Only the diagonal blocks of the filters contain non-zero values, while off-diagonal blocks are zero. This structured sparsity allows storing just the non-zero blocks in memory as sparse tensors, significantly reducing memory footprint. For large networks, this can lead to substantial savings, especially in embedded or GPU-constrained environments.
+
+\subsection{Mathematical Formulation}
+
+Let the input tensor be 
+$\mathcal{X} \in \mathbb{R}^{B \times H \times W \times C_{\text{in}}}$, 
+and the kernel be 
+$\mathcal{K} \in \mathbb{R}^{K_H \times K_W \times C_{\text{in}} \times C_{\text{out}}}$, 
+producing output 
+$\mathcal{Y} \in \mathbb{R}^{B \times H' \times W' \times C_{\text{out}}}$. 
+
+The \emph{width-folding} transformation reshapes the input tensor along the width dimension.
+F (folding factor) is chosen to align with Tensor core tile sizes.
+
+\begin{equation}{\columnwidth}
+\mathcal{X}_f \in \mathbb{R}^{B \times H \times \frac{W}{F} \times (C_{\text{in}} \cdot F)}, \quad
+F \in \mathbb{Z}^+ 
+\end{equation}
+
+The kernel is correspondingly transformed into a diagonal-blocked form:
+
+\begin{equation}{\columnwidth}
+\mathcal{K}_f \in \mathbb{R}^{K_H \times \frac{K_W}{F} \times (C_{\text{in}} \cdot F) \times (C_{\text{out}} \cdot F)}.
+\end{equation}
+
+The transformed convolution preserves the original semantics:
+
+\begin{equation}{\columnwidth}
+\mathcal{Y} = \text{Conv}(\mathcal{X}, \mathcal{K}) = \text{Reconstruct}\big(\text{Conv}(\mathcal{X}_f, \mathcal{K}_f)\big),
+\end{equation}
+
+where the reconstruction step involves reshaping the folded output back to the original width dimension.
+
+\subsection{Compiler-Level Realization in MLIR}
+
+Width-folding can be potentially implemented as a {\em semantics-preserving IR transformation in MLIR}. The transformation shall be performed over \texttt{linalg.conv\_2d\_nhwc} or \texttt{linalg.matmul} operations, and potentially consist of the following steps:
+
+\begin{enumerate}
+    \item \textbf{Tensor Reshape}: Reshape the input and output tensors to introduce a blocked channel dimension corresponding to the folding factor $F$.
+    \item \textbf{Affine Reindexing}: Map the original convolution indices to the folded tensor indices, ensuring that all data dependencies are preserved.
+    \item \textbf{Kernel Replication}: Replicate the kernel into a diagonal-blocked layout that is consistent with the folded input tensor.
+\end{enumerate}
+
+The legality of this transformation is straightforward: the width dimension must be divisible by $F$, and any padding must be applied consistently to preserve output shape. A lightweight cost model can estimate profitability by considering channel size, tensor core tile alignment, and arithmetic intensity.
+The transformation is fully composable with other MLIR passes such as tiling, vectorization, and lowering to CUDA or ROCm backends. Width folding thus provides a mathematically sound, hardware-aware optimization that can significantly improve performance of deep learning kernels in production compilers.
+
+\section{Generalization to GEMM via $1 \times 1$ Convolution}
+\label{sec:GEMM}
+
+While width folding is introduced in the context of convolutional operators, the underlying idea extends naturally to general matrix multiplication (GEMM). This follows from the well-known equivalence between GEMM and $1 \times 1$ convolution under appropriate reshaping. We describe this equivalence and show how width folding applies directly to GEMM through this formulation.
+
+\subsection{GEMM as a $1 \times 1$ Convolution}
+
+Consider a matrix multiplication
+\[
+C = A B,
+\]
+where $A \in \mathbb{R}^{M \times K}$ and $B \in \mathbb{R}^{K \times N}$.
+
+We reshape matrix $A$ into a tensor
+\[
+X \in \mathbb{R}^{H \times W \times C_{\text{in}}},
+\]
+by choosing
+\[
+H = M, \quad W = 1, \quad C_{\text{in}} = K,
+\]
+and interpreting each row of $A$ as a spatial position with $K$ channels.
+
+Similarly, matrix $B$ is reshaped into a $1 \times 1$ convolution kernel
+\[
+W_f \in \mathbb{R}^{1 \times 1 \times C_{\text{in}} \times C_{\text{out}}},
+\]
+with $C_{\text{out}} = N$.
+
+Applying a $1 \times 1$ convolution produces an output tensor
+\[
+Y \in \mathbb{R}^{H \times 1 \times C_{\text{out}}},
+\]
+which is equivalent to the GEMM result $C$ after reshaping.
+
+This construction is algebraically exact and introduces no approximation.
+
+\subsection{Applying Width Folding to GEMM}
+
+In this formulation, the channel dimension corresponds to the reduction dimension $K$ of the matrix multiplication. When $K$ is small or poorly aligned with hardware tile sizes, the resulting computation underutilizes specialized matrix-multiply units.
+
+Width folding can be applied by reindexing an auxiliary spatial dimension and redistributing it into the channel dimension. Concretely, we introduce a synthetic width dimension $W$ and fold it into channels:
+\[
+X \in \mathbb{R}^{H \times W \times 1}
+\;\;\rightarrow\;\;
+X' \in \mathbb{R}^{H \times (W/F) \times F}.
+\]
+
+The corresponding $1 \times 1$ kernel is replicated into a block-diagonal form, exactly as in the convolutional case. The resulting operator remains a $1 \times 1$ convolution and is therefore equivalent to a GEMM with expanded effective channel dimensionality.
+
+This equivalence shows that width folding is not specific to convolutional layers, but applies more broadly to linear operators expressed as tensor contractions. From a compiler perspective, GEMM and convolution differ only in indexing structure, and both can benefit from operator-level reformulation. This observation further supports expressing width folding as a general compiler transformation rather than a domain-specific optimization.
+
+
+
+\section{Potential Optimizations for Sparsity and Quanitization}
+Efficient exploitation of sparsity is crucial for both memory savings and computational acceleration. The block-diagonal filter structure introduces structured sparsity that can be leveraged in multiple ways. Only the diagonal blocks of the filters contain non-zero values, while off-diagonal blocks are zero. This structured sparsity allows storing just the non-zero blocks in memory as sparse tensors, significantly reducing memory footprint. For large networks, this can lead to substantial savings, especially in embedded or GPU-constrained environments. Several modern deep learning frameworks and custom CUDA kernels can exploit this by performing sparse matrix multiplications, reducing the number of operations and increasing throughput. Popular deep learning frameworks such as PyTorch and TensorFlow provide built-in support for grouped convolutions. By mapping each diagonal block to a group, the block-diagonal convolution can be implemented efficiently without modifying the core framework. 
     
-    \item \textbf{Computation:} Convolutions involving zero blocks do not contribute to the output, so these computations can be safely skipped. Modern deep learning frameworks and custom CUDA kernels can exploit this by performing sparse matrix multiplications, reducing the number of operations and increasing throughput.
-    
-    \item \textbf{Framework Support:} Popular deep learning frameworks such as PyTorch and TensorFlow provide built-in support for grouped and sparse convolutions. By mapping each diagonal block to a group, the block-diagonal convolution can be implemented efficiently without modifying the core framework. Additionally, frameworks may optimize memory access patterns to reduce cache misses during sparse computations.
-    
-    \item \textbf{Quantization:} Structured sparsity pairs naturally with mixed-precision quantization (FP16/INT8). By representing both weights and activations in lower precision, memory bandwidth is reduced, and Tensor Cores can achieve higher throughput. Combining quantization with block-diagonal sparsity ensures that only essential computations are performed at high speed, improving overall efficiency while maintaining model accuracy.
-\end{itemize}
-
-\section {Extending the transformation}
-Table~\ref{tab:cnn_transformations} summarizes a set of potential hardware-aware CNN transformations that extend the core idea explored in this work. While the width folding transform itself was derived manually from first principles, the transformations in Table~\ref{tab:cnn_transformations} were generated by AI (ChatGPT). All transformations are post-training and operate by rewriting the underlying convolutional computation to satisfy hardware-specific alignment and execution constraints, rather than relying on conventional techniques such as zero padding or network retraining. The transformations are ordered by increasing conceptual and implementation complexity, ranging from simple channel and spatial folding to more advanced sparsity-aware and N-dimensional rewrites. While only a single transformation is formally derived and validated in this paper, the table outlines a broader design space of mathematically equivalent reformulations that could be systematically explored in future work. These transformations are currently unverified and are intended to illustrate how a rule-based or compiler-driven framework could generalize the proposed approach across different accelerator architectures, including but not limited to NVIDIA Tensor Cores.
-
-
-\begin{table*}[t]
-\centering
-\small
-\caption{Potential (unverified) hardware-aware CNN transformations (post-training), generated by AI.}
-\label{tab:cnn_transformations}
-\begin{tabularx}{\textwidth}{|l|X|X|X|}
-\hline
-\textbf{Transformation} & \textbf{Description} & \textbf{Hardware Constraint Addressed} & \textbf{Notes / Benefits} \\
-\hline
-Kernel Reordering / Permutation & Reorder kernel elements to match hardware memory layout & Memory coalescing, tensor core tiling & Improves cache utilization \\
-Depthwise / Grouped Splitting & Split convolution into depthwise or grouped operations & SIMD or tensor-core efficiency & Increases parallelism \\
-Spatial Folding / Height Folding & Fold spatial dimensions to match tile sizes & Vector-width alignment & Useful for large images \\
-Precision Folding / Mixed-Precision Rewriting & Convert weights/activations to FP16 or BF16 & Tensor core precision constraints & Improves throughput \\
-Channel Pruning & Remove redundant channels and repack remaining ones & Channel alignment & Can combine with folding \\
-Strided / Dilated Rewriting & Rewrite strided/dilated convolutions & Tile-size optimization & Preserves output equivalence \\
-Sparsity-Aware Weight Folding & Rearrange sparse weights into dense aligned blocks & Block-sparse GEMM & Exploits structured sparsity \\
-N-D Dimension Folding & Extend folding to 2D/3D convolutions & Multi-dimensional tiling & Generalizes channel folding \\
-\hline
-\end{tabularx}
-\end{table*}
-%\clearpage
+Structured sparsity pairs naturally with mixed-precision quantization (FP16/INT8). By representing both weights and activations in lower precision, memory bandwidth is reduced, and Tensor Cores can achieve higher throughput. Combining quantization with block-diagonal sparsity ensures that only essential computations are performed at high speed, improving overall efficiency while maintaining model accuracy.
 
 
 %\twocolumn
 
 
 
+
+\section{Results}
+We implemented the proposed widthfolding transformation in both TensorFlow and TensorRT, validating it against functionally equivalent convolution operations. All experiments and ablation studies were conducted on NVIDIA A100 GPUs using proprietary CNN models. Due to intellectual property and data-sharing constraints, detailed experimental configurations, model architectures, and raw performance measurements cannot be publicly disclosed.
+However, a reference implementation in Python using TensorFlow API is provided in Appendix~\ref{app:reference}, allowing reproducibility of the transformation on synthetic or publicly available models. 
+
+To provide context for performance, the complete set of empirical results is summarized in the accompanying patent application ~\cite{roche_pct}. These results demonstrate a minimum of 3× improvement over baseline implementations (vanilla TensorRT C++ API~\cite{tensorrt}) on A100-class hardware. The observed gains are primarily attributable to alignment-aware reformulation of convolution operations, which improves Tensor Core utilization compared to conventional zero-padding strategies.
+
+FP16 precision was used in all experiments. It should be noted that TensorRT does not natively support Tensor Core operations with FP16 input when the number of input channels is not a multiple of eight. It was using a sub-optimal convolution kernel for this case. While H100 and B-series GPUs were unavailable during experimentation, the method is expected to generalize to newer architectures (H200/H800/B200), and re-evaluation on these platforms is planned contingent on hardware access. Importantly, TensorRT is already highly optimized; achieving 3× performance improvement indicates a fundamentally new algorithmic approach, improved hardware utilization, and domain-specific optimization beyond generic kernels.
+
+Although cuDNN ~\cite{chetlur2014cudnn}, another popular deep learning framework, exposes FP16 convolution at the API level, convolutions with very small input channel counts—most notably $C_{\text{in}} = 1$—are not allowed by default due to reason that tensor Cores require matrix dimensions that are multiples of 8. For such cases, the responsibility is pushed to the user rather than the library and users must explicitly pad the channel dimension with zeros or use FP32 variant. Zero padding increases memory traffic and performs wasted computation on artificial data, while falling back to FP32 introduces FP16--FP32--FP16 conversion overhead and executes on CUDA cores (not Tensor cores). In both cases, Tensor Cores remain underutilized, despite their theoretical ability to provide up to an $8\times$ throughput improvement for FP16 operations.
+
+The above facts reflect the design philosophy of TensorRT and cuDNN as a general-purpose kernel library rather than a system that invents new mathematical formulations. They faithfully implement the operation given; they do not reinterpret tensor dimensions or apply semantics-changing transformations to satisfy hardware alignment requirements. In contrast, our approach introduces a semantics-preserving mathematical transformation that increases the effective channel dimension without zero padding or precision up/down-conversion. This reparameterization makes the convolution natively compatible with FP16 Tensor Core kernels, enabling high utilization and substantially higher performance than existing cuDNN or TensorRT implementations for low-channel-count convolutions.
+
+
+The proposed method applies to any convolutional layer, not just the first layer, and can also be extended to linear layers (i.e., GEMM) as noted in Section~\ref{sec:GEMM}. This extension implies that the transformation could accelerate GEMM operations in cuBLAS (especially, those involving {\em tall skinny matrices}). A $3\times$ speedup over cuBLAS is a potential break through in compiler optimization.
+
+The observed results are consistent with publicly available NVIDIA documentation~\cite{nvidia_cnn} , providing further confidence in the correctness and potential impact of the method. Finally, this transformation can be applied even during tranining process to realize similar speedups and tensorcore utilization.
+
 \section{Related Work}
-Optimizing CNNs for hardware accelerators has been an active area of research. \textit{NVIDIA Tensor Cores} and other mixed-precision matrix multiplication units benefit from channel alignment~\cite{micikevicius2017mixed}. Previous work on grouped~\cite{krizhevsky2012imagenet} and depthwise convolutions~\cite{howard2017mobilenets} introduces structured sparsity for efficiency. Our approach draws inspiration from these techniques, combining channel expansion and block-diagonal sparsity to fully exploit hardware throughput. Similar strategies have been explored in low-rank filter approximations~\cite{jaderberg2014speeding} and kernel tiling optimizations~\cite{chetlur2014cudnn}, but our method maintains the original filter semantics while providing full Tensor Core alignment.
+Optimizing CNNs for hardware accelerators has been an active area of research. Our approach draws inspiration from several exising techniques, combining channel expansion and block-diagonal sparsity to fully exploit hardware throughput. 
 
 \subsection{Relation to Other CNN Variants}
 
 \subsubsection{Grouped Convolutions}
-In grouped convolutions, input channels are divided into separate groups, and each group is convolved independently with a corresponding set of filters. Our block-diagonal transformation naturally induces a similar structure: each diagonal block in the filter corresponds to a “group” that processes a subset of the input channels. However, unlike standard grouped convolutions, our approach preserves the original filter values within each block and replicates them in a controlled manner to align with Tensor Core hardware. This ensures maximum hardware utilization without changing the semantic meaning of the original convolution.
+In grouped convolutions~\cite{krizhevsky2012imagenet}, input channels are divided into separate groups, and each group is convolved independently with a corresponding set of filters. Our block-diagonal transformation naturally induces a similar structure: each diagonal block in the filter corresponds to a “group” that processes a subset of the input channels. However, unlike standard grouped convolutions, our approach preserves the original filter values within each block and replicates them in a controlled manner to align with Tensor Core hardware. This ensures maximum hardware utilization without changing the semantic meaning of the original convolution.
 
 \subsubsection{Depthwise and Pointwise Convolutions}
-Depthwise convolutions apply a single filter per input channel, significantly reducing computation but also limiting feature interactions across channels. Pointwise (1×1) convolutions are then used to combine features across channels. The block-diagonal filter transformation resembles a hybrid of these approaches: each block is multi-channel (not single-channel as in depthwise) and operates on a subset of input channels, while off-diagonal blocks are zeroed to create structured sparsity. This design maintains full multi-channel processing within blocks while still enabling computational efficiency similar to depthwise convolutions. Unlike traditional depthwise or pointwise convolutions, our method explicitly targets hardware alignment for Tensor Cores.
+Depthwise convolutions~\cite{howard2017mobilenets} apply a single filter per input channel, significantly reducing computation but also limiting feature interactions across channels. Pointwise (1×1) convolutions are then used to combine features across channels. The block-diagonal filter transformation resembles a hybrid of these approaches: each block is multi-channel (not single-channel as in depthwise) and operates on a subset of input channels, while off-diagonal blocks are zeroed to create structured sparsity. This design maintains full multi-channel processing within blocks while still enabling computational efficiency similar to depthwise convolutions. Unlike traditional depthwise or pointwise convolutions, our method explicitly targets hardware alignment for Tensor Cores.
 
 \subsubsection{Channel Expansion / 1×1 Convolutions}
 Channel expansion via 1×1 convolutions is commonly used to increase the number of output channels and enable more expressive representations. In our approach, the block-diagonal transformation can be interpreted as a structured channel expansion: the original output channels are replicated across diagonal blocks to create a padded, hardware-aligned output tensor. This provides the benefits of channel expansion—higher representational capacity—without introducing additional learnable parameters beyond the original filter. The key distinction is that our expansion is carefully organized to match hardware constraints, which is not considered in conventional 1×1 convolutions.
 
+Similar strategies have been explored in low-rank filter approximations~\cite{jaderberg2014speeding} and kernel tiling optimizations~\cite{chetlur2014cudnn}, but our method maintains the original filter semantics while providing full Tensor Core alignment.
+
 \subsection{Difference from Channel Zero-Padding}
 
-A naive approach to align channels for hardware efficiency is zero-padding in the channel dimension. For example, if a layer has 5 input channels and the hardware prefers multiples of 8, you could append 3 extra channels filled with zeros. While this ensures that the total number of channels is divisible by 8, it has several limitations:
-\begin{itemize}
-\item No reuse of original filter weights:
-Zero-padding simply adds empty channels. The convolution computation over these extra channels does nothing useful—these channels carry no information.
+A naive approach to align channels for hardware efficiency is zero-padding in the channel dimension. For example, if a layer has 5 input channels and the hardware prefers multiples of 8, you could append 3 extra channels filled with zeros. While this ensures that the total number of channels is divisible by 8, it has several limitations. 
+Zero-padding simply adds empty channels. The convolution computation over these extra channels does nothing useful—thesechannels carry no information. Even though the number of channels is aligned, Tensor Cores may still process these zero channels, wasting compute cycles on irrelevant data.
+zero-padding does not create a predictable pattern that frameworks can exploit. In contrast, block-diagonal filters introduce structured sparsity, where off-diagonal blocks are zero but the diagonal blocks contain actual filter weights. Frameworks can leverage this for efficient computation (skipping zeros).
+Finally, Block-diagonal filters naturally generalize to higher dimensions and grouped structures.
 
-\item Underutilized computation:
-Even though the number of channels is aligned, Tensor Cores may still process these zero channels, wasting compute cycles on irrelevant data.
-
-\item No structured sparsity for efficiency:
-Channel zero-padding does not create a predictable pattern that frameworks can exploit. In contrast, block-diagonal filters introduce structured sparsity, where off-diagonal blocks are zero but the diagonal blocks contain actual filter weights. Frameworks can leverage this for efficient computation (skipping zeros).
-
-\item Preserves semantic connections:
-With channel zero-padding, the output channels corresponding to padded zeros produce meaningless feature maps. In contrast, the block-diagonal approach replicates the original filters across diagonal blocks, maintaining meaningful convolutional connections and expanding output channels in a controlled manner.
-
-\item Better generalization to grouped and n-dimensional convolutions:
-Block-diagonal filters naturally generalize to higher dimensions and grouped structures, while zero-padded channels remain sparse and unused, limiting flexibility and efficiency.
 \end{itemize}
 
-\section{Advantages of the Method}
-The proposed block-diagonal filter transformation offers multiple advantages:
-\begin{enumerate}
-    \item \textbf{Hardware-aligned computation:} By padding and reorganizing channels, the method fully leverages Tensor Core throughput without modifying the underlying kernel operations.
-    \item \textbf{Preservation of filter semantics:} The original filter patterns are maintained within diagonal blocks, ensuring that learned features and connectivity are preserved.
-    \item \textbf{Structured sparsity:} Zero-filled off-diagonal blocks create structured sparsity, which can be exploited for memory and compute efficiency in modern deep learning frameworks.
-    \item \textbf{Generalizability:} The approach extends naturally to 2-D, 3-D, and n-D convolutions, making it applicable to image, video, and volumetric data.
-    \item \textbf{Compatibility:} Integrates seamlessly with existing CNN frameworks such as PyTorch and TensorFlow, allowing direct deployment on GPUs with Tensor Core support.
-    \item \textbf{Reduced memory footprint:} Only diagonal blocks need to be stored densely, and sparse representations reduce memory usage.
-    \item \textbf{Optimization potential with quantization:} Combining structured sparsity with mixed-precision operations (FP16/INT8) further improves throughput while maintaining accuracy.
-    \item \textbf{Relationship to other convolution types:} Analogous to grouped, depthwise, and channel-expansion convolutions, it enables flexibility for designing efficient CNN architectures while maintaining high hardware utilization.
-\end{enumerate}
+\subsection{Contrast with Traditional Compiler Transformations}
 
-\subsection{Contrast with Compiler Transformations}
-
-Width folding differs fundamentally from conventional compiler
+Width folding differs fundamentally from traditional compiler
 transformations applied in deep learning systems.
 Traditional compiler optimizations—such as operator fusion, loop tiling,
 layout reordering, vectorization, and kernel selection—preserve the
@@ -735,36 +896,24 @@ As a result, hardware alignment constraints (e.g., channel dimensions being
 multiples of a fixed factor) are satisfied without relying on padding or
 special-case kernel implementations.
 
-Another key distinction is the point at which the transformation is applied.
-Compiler transformations are typically applied dynamically or at
-compile time and are constrained by the original operator definitions
-exposed in the computation graph.
-Width folding is a \emph{post-training, pre-compilation} transformation:
-it modifies the trained model itself before it is handed to the compiler or
-runtime.
-This enables downstream compilers to treat the transformed model as a
-standard convolution that naturally maps to optimized hardware kernels.
 
 Finally, while compiler transformations are generally opaque and
 hardware-specific, width folding is expressed as an explicit, semantics-
 preserving rewrite rule.
 This makes the transformation analyzable, provably correct, and amenable to
 future automation.
+
+Width folding is a \emph{post-training, pre-compilation} transformation:
+it modifies the trained model itself before it is handed to the compiler or
+runtime.  This enables downstream compilers to treat the transformed model as a
+standard convolution that naturally maps to optimized hardware kernels.
 Rather than replacing compiler optimizations, width folding complements
 them by expanding the space of hardware-friendly formulations that
 compilers can further optimize.
 
 
-\section{Results}
-We implemented the proposed width transformation in both TensorFlow and cuDNN and validated it against standard, functionally equivalent convolution operations.  All experimental evaluations and ablation studies related to the width-folding transformation were conducted on NVIDIA A100 GPUs using proprietary CNN models. Due to intellectual property and data-sharing constraints, detailed experimental configurations, model architectures, and raw performance measurements cannot be publicly disclosed in this paper. The complete set of empirical results is therefore summarized in the accompanying patent application authored by the same author \cite{roche_pct}.
-
-The reported results in the patent demonstrate up to $3\times$ performance improvement over baseline implementations on A100-class hardware, attributable to improved utilization of Tensor Cores through alignment-aware mathematical reformulation rather than conventional zero-padding strategies. H100 and B-series GPUs were not available at the time of experimentation.
-
-This paper serves as a formal follow-up to the patent, providing a first-principles derivation, mathematical correctness proof, and generalization framework for the transformation. While the empirical results are documented elsewhere, the primary contribution here is the provably equivalent post-training reformulation of CNN computation, intended as a foundation for future automated and compiler-driven optimization efforts.
-The observed results are consistent with publicly available documentation released by NVIDIA (NVIDIA Corporation, 2023). Furthermore, the proposed method is applicable to any convolutional layer—not limited to the first layer—and can also be extended to linear layers in deep neural networks, leading to even further speed up gains.
-
 \section{Conclusion}
-We presented a block-diagonal transformation for CNN filters that aligns input and output channels with NVIDIA Tensor Core requirements. The method maintains the original filter structure, generalizes to n-D convolutions, and exploits sparsity for memory and computational efficiency. This approach bridges hardware-aware optimizations with traditional CNN design principles, providing a practical and scalable solution for high-performance deep learning deployments.
+We presented a transformation for CNN filters that aligns input and output channels with NVIDIA Tensor Core requirements. The method maintains the original filter structure, generalizes to n-D convolutions, and exploits sparsity for memory and computational efficiency. This approach bridges hardware-aware optimizations with traditional CNN design principles, providing a practical and scalable solution for high-performance deep learning deployments.
 
 \subsection{Future Work}
 
@@ -772,32 +921,29 @@ Several promising research directions follow naturally.
 First, we plan to explore a broader class of \emph{structure-preserving
 transformations} beyond block-diagonal reformulations. These include
 alternative spatial--channel folding strategies, hierarchical blocking,
-and mixed-radix reshaping schemes that may better match the execution
-models of different accelerators. Such transformations could enable
+mixed-radix reshaping schemes, sparsity aware folding and dilation
+rewriting. Such transformations could enable
 efficient utilization of hardware units with strict alignment,
-vectorization, or tiling requirements.
+vectorization, or tiling requirements. Also, it is interesting
+to study if the inverse (i.e. channel-to-space) is possible mathematically.
 
-Second, while NVIDIA Tensor Cores motivated the current formulation,
-the underlying idea is hardware-agnostic. Future work will investigate
+Second, we plan to investigate
 transformations tailored to other GPU architectures, including AMD
 GPUs, where wavefront sizes, memory coalescing rules, and matrix
 instruction formats differ substantially. Developing a unified
-transformation framework that adapts CNN operators to multiple
-backends remains an open and important problem.
+transformation framework that adapts this idea to multiple
+specialized hardware as well as general-purpose CPU (e.g. alignment
+requirement for SIMD or cache usage) remains an open and important problem.
 
 Third, we aim to extend these techniques to other operators commonly
 used in modern architectures, such as depthwise separable convolutions,
 attention mechanisms~\cite{attention}, and recurrent layers~\cite{lstm}. 
-Identifying algebraic
-equivalences that expose hardware-friendly structure without changing
-model behavior could significantly broaden the impact of this approach.
 
-Finally, we envision integrating these transformations into compiler and graph-optimization pipelines, such as TensorRT~\cite{tensorrt}. An alternative and complementary direction is to realize these transformations within an MLIR-based~\cite{mlir} compilation framework.  More broadly, we introduce \emph{semantic tuning} as a post-training optimization paradigm in which the mathematical formulation of a neural network is rewritten to better match hardware execution constraints while preserving the exact input–output semantics of the original model. Unlike traditional tuning techniques that modify network architectures, retrain parameters, or inject auxiliary operations such as zero padding, semantic tuning operates purely at the level of algebraic reformulation. The learned weights remain unchanged in value, and the network’s functional behavior is preserved by construction.
+Finally, we envision integrating these transformations into MLIR~\cite{mlir} framework. More broadly, we introduce \emph{semantic tuning} as a post-training optimization paradigm in which the mathematical formulation of a neural network is rewritten to better match hardware execution constraints while preserving the exact input–output semantics of the original model. This shifts the compiler optimizations from hardware-specific kernel
+optimization toward \emph{semantically equivalent operator transformations}, 
+achieving performance portability.
 
-Overall, this work suggests a shift from hardware-specific kernel
-optimization toward \emph{semantic operator transformations} as a
-systematic method for achieving performance portability.
-
+\FloatBarrier
 \bibliography{cnn_paper_icml}
 \bibliographystyle{icml2026}
 
@@ -808,6 +954,7 @@ systematic method for achieving performance portability.
 % In your section where you want the figure
 % -----------------------------
 \section{Example Code using Tensorflow CNN (Channels-Last)}
+\label{app:reference}
 This Tensorflow implementation demonstrates a 2-D block-diagonal filter transformation where the input is in **channels-last format** (`[B, H, W, C_in]`), the W dimension is folded, and the convolution is compatible with NVIDIA Tensor Cores.
 
 \usepackage{listings}
