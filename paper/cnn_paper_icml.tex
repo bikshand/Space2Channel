@@ -867,12 +867,8 @@ Similar strategies have been explored in low-rank filter approximations~\cite{ja
 
 \subsection{Difference from Channel Zero-Padding}
 
-A naive approach to align channels for hardware efficiency is zero-padding in the channel dimension. For example, if a layer has 5 input channels and the hardware prefers multiples of 8, you could append 3 extra channels filled with zeros. While this ensures that the total number of channels is divisible by 8, it has several limitations. 
-Zero-padding simply adds empty channels. The convolution computation over these extra channels does nothing useful—thesechannels carry no information. Even though the number of channels is aligned, Tensor Cores may still process these zero channels, wasting compute cycles on irrelevant data.
-zero-padding does not create a predictable pattern that frameworks can exploit. In contrast, block-diagonal filters introduce structured sparsity, where off-diagonal blocks are zero but the diagonal blocks contain actual filter weights. Frameworks can leverage this for efficient computation (skipping zeros).
-Finally, Block-diagonal filters naturally generalize to higher dimensions and grouped structures.
+A simple approach to align channels for hardware is \emph{zero-padding}: if a layer has 1 input channel and the hardware prefers multiples of 8, 7 zero channels are added. While this aligns the total channels, these extra channels carry no information, wasting compute on irrelevant data. In contrast, \emph{width-folding} avoids adding input channels, expanding only the (small) weight tensor. It creates \emph{block-diagonal filters}, introducing structured sparsity that frameworks can exploit for efficient computation. Moreover, this pattern naturally generalizes to higher-dimensional and grouped convolutions.
 
-\end{itemize}
 
 \subsection{Contrast with Traditional Compiler Transformations}
 
@@ -933,10 +929,12 @@ GPUs, where wavefront sizes, memory coalescing rules, and matrix
 instruction formats differ substantially. Developing a unified
 transformation framework that adapts this idea to multiple
 specialized hardware as well as general-purpose CPU (e.g. alignment
-requirement for SIMD or cache usage) remains an open and important problem.
+requirement for SIMD or cache usage ~\cite{onednn2025}) 
+remains an open and important problem.
 
 Third, we aim to extend these techniques to other operators commonly
-used in modern architectures, such as depthwise separable convolutions,
+used in modern architectures, such as grouped convolutions,
+depthwise separable convolutions,
 attention mechanisms~\cite{attention}, and recurrent layers~\cite{lstm}. 
 
 Finally, we envision integrating these transformations into MLIR~\cite{mlir} framework. More broadly, we introduce \emph{semantic tuning} as a post-training optimization paradigm in which the mathematical formulation of a neural network is rewritten to better match hardware execution constraints while preserving the exact input–output semantics of the original model. This shifts the compiler optimizations from hardware-specific kernel
