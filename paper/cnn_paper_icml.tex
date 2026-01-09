@@ -5,15 +5,18 @@
 % Recommended, but optional, packages for figures and better typesetting:
 \usepackage{microtype}
 \usepackage{graphicx}
-\usepackage{subcaption}
+\usepackage{caption}
 \usepackage{booktabs} % for professional tables
 \usepackage{listings}
 \usepackage{xcolor} % optional, for syntax highlighting
 \usepackage{float} % for H placement
-\usepackage{tikz}
 \usepackage{tabularx}
-\usetikzlibrary{arrows.meta, positioning, decorations.pathreplacing}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, decorations.pathreplacing, shadows}
 \usepackage{placeins}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
 
 \usepackage{tcolorbox}   % for boxed listings
 \tcbset{
@@ -62,10 +65,10 @@
 \newcommand{\theHalgorithm}{\arabic{algorithm}}
 
 % Use the following line for the initial blind version submitted for review:
-\usepackage{icml2026}
+%\usepackage{icml2026}
 
-% For preprint, use
-% \usepackage[preprint]{icml2026}
+%For preprint, use
+\usepackage[preprint]{icml2026}
 
 % If accepted, instead use the following line for the camera-ready submission:
 % \usepackage[accepted]{icml2026}
@@ -124,8 +127,10 @@
   \icmlsetsymbol{equal}{*}
 
   \begin{icmlauthorlist}
-    \icmlauthor{Firstname1 Lastname1}{equal,yyy}
+	  \icmlauthor{Ganesh Bikshandi}{yyy}
   \end{icmlauthorlist}
+  \icmlaffiliation{yyy}{vbganesh79@gmail.com}
+  \icmlcorrespondingauthor{Ganesh Bikshandi}{vbganesh79@gmail.com}
 
   % You may provide any keywords that you find helpful for describing your
   % paper; these are used to populate the "keywords" metadata in the PDF but
@@ -134,18 +139,19 @@
 
   \vskip 0.3in
 ]
+\printAffiliationsAndNotice{}  % no special notice (required even if empty)
 
 \begin{abstract}
-	Convolutional Neural Networks (CNNs) are central to modern AI, but their performance is often limited by hardware constraints. NVIDIA Tensor Cores, for instance, require input channels to be multiples of 8 and sometimes 512 for efficient execution~\cite{nvidia_cnn}. Traditional approaches address such alignment using zero-padding, which can be inefficient. In this work, we present a first-step, hardware-aware reformulation of CNN computations using rewrite rules, restructuring the underlying math to satisfy hardware alignment entirely {\bf post-training} without modifying network weights. While our current implementation focuses on a single transformation for Tensor Cores, this approach is generalizable, laying the foundation to explore additional transformations for other accelerators, including AMD GPUs. This study represents an initial step toward {\em semantic tuning}, a systematic, hardware-aware optimization strategy for efficient deployment of CNN models on specialized AI hardware.
+	Convolutional Neural Networks (CNNs) are central to modern AI, but their performance is often limited by hardware constraints. NVIDIA Tensor Cores, for instance, require input channels to be multiples of 8 and sometimes 512 for efficient execution. {\em oneDNN} framework for CPU imposes such a requirement for the blocked format. Traditional approaches address such alignment issue using zero-padding, which can be inefficient. In this work, we present a first-step, hardware-aware reformulation of CNN computations using rewrite rules, restructuring the underlying math to satisfy hardware alignment entirely {\bf post-training} without modifying network weights. While our current implementation focuses on a single transformation for Tensor Cores, this approach is generalizable, laying the foundation to explore additional transformations for CPU and accelerators. This study represents an initial step toward {\em semantic tuning}, a systematic, hardware-aware optimization strategy for efficient deployment of CNN models on specialized AI hardware.
 \end{abstract}
 
 \section{Introduction}
 
 Convolutional Neural Networks (CNNs) are a foundational building block of modern deep learning systems, underpinning applications ranging from computer vision to speech and scientific computing. At a high level, CNNs apply learnable filters to structured input tensors in order to extract hierarchical feature representations. For a standard convolution, the input tensor has shape $(N, C_{\text{in}}, H[, W, D])$, the filter weights have shape $(C_{\text{out}}, C_{\text{in}}, K_1[, K_2, \ldots, K_n])$, and the resulting output tensor has shape $(N, C_{\text{out}}, H_{\text{out}}[, W_{\text{out}}, D_{\text{out}])}$. This formulation uses the NCHW layout; alternate layout is NHWC.
 
-While this mathematical formulation is hardware-agnostic, the efficient execution of CNNs on modern AI accelerators is strongly influenced by hardware-specific constraints. Specialized units such as NVIDIA Tensor Cores and analogous matrix-multiply engines in other accelerators impose alignment and tiling requirements on tensor dimensions, most notably that certain dimensions (e.g., channel counts) be multiples of fixed factors such as eight or a higher count like 512~\cite{nvidia_cnn}. When these constraints are not satisfied, libraries either fall back to less efficient execution paths or require auxiliary modifications such as zero padding, which introduce redundant computation and memory overhead.
+While this mathematical formulation is hardware-agnostic, the efficient execution of CNNs on modern AI accelerators is strongly influenced by hardware-specific constraints. Specialized units such as NVIDIA Tensor Cores and analogous matrix-multiply engines in other accelerators impose alignment and tiling requirements on tensor dimensions, most notably that certain dimensions (e.g., channel counts) be multiples of fixed factors such as eight or a higher count like 512~\cite{nvidia_cnn}. Also, {\em oneDNN} framework~\cite{onednn2025} for CPU imposes such an alignment requirement for the blocked format. When these constraints are not satisfied, libraries either fall back to less efficient execution paths or require auxiliary modifications such as zero padding, which introduce redundant computation and memory overhead.
 
-It is possible to address these constraints during network design or training, for example by manually choosing channel dimensions or retraining models with padded tensors. In contrast, this paper explores a complementary and largely underexplored direction: post-training reformulation of CNN computations. Rather than modifying the network architecture or retraining weights, we rewrite the underlying convolutional mathematics to produce an equivalent formulation that satisfies hardware alignment and channel count requirements by construction.
+It is possible to address these constraints during network design or training, for example by manually increasing the channels or retraining models with $1\times1$ convolution. In contrast, this paper explores a complementary and largely underexplored direction: post-training reformulation of CNN computations. Rather than modifying the network architecture or retraining weights, we rewrite the underlying convolutional mathematics to produce an equivalent formulation that satisfies hardware alignment and channel count requirements by construction.
 
 Specifically, we present an initial hardware-aware transformation that reshapes and reinterprets the convolutional computation—through {\bf width folding for input in NHWC format (alternatively height folding for NCHW format)} and {\bf structured filter expansion} — so that the resulting tensors conform to accelerator alignment constraints while preserving exact numerical equivalence to the original CNN. This transformation eliminates the need for zero padding and does not alter the learned parameters or outputs of the network. Although the paper focuses on a single transformation motivated by NVIDIA Tensor Core constraints, the broader goal is to establish a foundation for a family of such rewrite rules that can be systematically derived and applied across different accelerator architectures.
 
@@ -156,7 +162,7 @@ Viewed through this lens, CNN execution can be treated as a compilation problem,
 \small
 \caption{First-layer channels in popular CNN architectures}
 \label{tab:firstlayer}
-\begin{tabularx}{\columnwidth}{|X|c|c|X|}
+\begin{tabularx}{\columnwidth}{|X|c|}
 \hline
 \textbf{Network} & \textbf{Input Channels} \\
 \hline
@@ -174,24 +180,18 @@ To motivate the need for hardware-aware filter alignment, we survey several wide
 
 The paper makes the following contributions:
 
+The paper makes the following contributions:
+
 \begin{itemize}
-\item Introduce \emph{semantic reformulation} as a hardware-aware optimization paradigm.
-\item Present \emph{width folding}, a semantics-preserving transformation that increases effective channel dimensionality without padding.
-\item Provide a formal correctness proof.
-\item Show how the transformation fits naturally as an MLIR compiler pass.
-\item Eemonstrate generalization to GEMM via $1\times1$ convolutions.
-\item Report up to $3\times$ speedups over cuDNN/TensorRT on NVIDIA A100.
+  \item Introduce \emph{semantic reformulation} as a hardware-aware optimization paradigm.
+  \item Present \emph{width folding}, a semantics-preserving transformation that increases effective channel dimensionality without padding.
+  \item Provide a formal correctness proof.
+  \item Show how the transformation fits naturally as an MLIR compiler pass.
+  \item Demonstrate generalization to GEMM via $1\times1$ convolutions.
+  \item Report up to $3\times$ speedups over cuDNN/TensorRT on NVIDIA A100.
 \end{itemize}
 
 
-%\begin{figure}[h!]
-%    \centering
-%    \includegraphics[width=0.8\columnwidth]{scheme4.png}
-%    \caption{Illustration of the block-diagonal filter transformation for a 1-D CNN. The input tensor is reshaped and combined with a block-diagonal filter to produce a Tensor Core-efficient output.}
-%    \label{fig:blockdiag1d}
-%\end{figure}
-
-%\onecolumn
 \begin{figure}[h!]
 \centering
 \resizebox{\columnwidth}{!}{%
@@ -208,33 +208,39 @@ The paper makes the following contributions:
 \definecolor{outputpurple}{RGB}{235,220,255}
 
 % Original CNN
-\node[box, fill=inputblue] (input1) at (0,2)
-{Input Feature Map\\
-$\mathbf{x} \in \mathbb{R}^{ H \times W \times Cin}$};
+\node[box, fill=inputblue] (input1) at (0,2) {%
+\parbox{3cm}{Input Feature Map\\
+$\mathbf{x} \in \mathbb{R}^{H \times W \times C_{\rm in}}$}%
+};
 
-\node[box, fill=filtergreen] (filter1) at (0,0)
-{Filter Weights\\
-$\mathbf{W} \in \mathbb{R}^{K \times Cin}$};
+\node[box, fill=filtergreen] (filter1) at (0,0) {%
+\parbox{3cm}{Filter Weights\\
+$\mathbf{W} \in \mathbb{R}^{K \times C_{\rm in}}$}%
+};
 
 % Rewrite
-\node[box, fill=rewriteorange] (rewrite) at (5,1)
-{Hardware-Aware Rewrite\\
+\node[box, fill=rewriteorange] (rewrite) at (5,1) {%
+\parbox{3cm}{Hardware-Aware Rewrite\\
 Width $\rightarrow$ Channel Folding\\
-(No Zero Padding)};
+(No Zero Padding)}%
+};
 
 % New CNN
-\node[box, fill=inputblue] (input2) at (10,2)
-{Folded Input\\
-	$\tilde{\mathbf{x}} \in \mathbb{R}^{H \times (W \div F) \times (Cin \dot F))}$};
+\node[box, fill=inputblue] (input2) at (10,2) {%
+\parbox{3cm}{Folded Input\\
+$\tilde{\mathbf{x}} \in \mathbb{R}^{H \times \frac{W}{F} \times (C_{\rm in} \cdot F)}$}%
+};
 
-\node[box, fill=filtergreen] (filter2) at (10,0)
-{Block-Diagonal Filter\\
-$\tilde{\mathbf{W}} \in \mathbb{R}^{K \times (Cin \cdot F)}$};
+\node[box, fill=filtergreen] (filter2) at (10,0) {%
+\parbox{3cm}{Block-Diagonal Filter\\
+$\tilde{\mathbf{W}} \in \mathbb{R}^{K \times (C_{\rm in} \cdot F)}$}%
+};
 
 % Output
-\node[box, fill=outputpurple] (output) at (10,-2)
-{Output\\
-$\tilde{y}(t) = y(t)$};
+\node[box, fill=outputpurple] (output) at (10,-2) {%
+\parbox{3cm}{Output\\
+$\tilde{y}(t) = y(t)$}%
+};
 
 % Arrows
 \draw[arrow] (input1.east) -- (rewrite.west);
@@ -246,110 +252,64 @@ $\tilde{y}(t) = y(t)$};
 \draw[arrow] (input2.south) -- (output.north);
 \draw[arrow] (filter2.south) -- (output.north);
 
-% Annotation
-\node at (5,3.2)
-{\textbf{Tensor Core Constraint:}\\
-Channels must be multiple of 8};
+% Annotations
+\node at (5,3.2) {%
+\parbox{6cm}{\textbf{Tensor Core Constraint:}\\Channels must be multiple of 8}%
+};
 
-\node at (5,-1.4)
-{\textbf{Key Idea:}\\
-Rewrite CNN math,\\
-not the data};
+\node at (5,-1.4) {%
+\parbox{6cm}{\textbf{Key Idea:}\\Rewrite CNN math, not the data}%
+};
 
-\end{tikzpicture}
+\end{tikzpicture}%
 }
 \caption{Hardware-aware reformulation of a CNN via width-to-channel folding.
 The rewrite preserves exact semantics while satisfying Tensor Core alignment
 constraints without zero padding or retraining.}
-
 \label{fig:cnn_rewrite}
 \end{figure}
-
 
 \begin{figure}[t]
 \centering
 \resizebox{\columnwidth}{!}{%
-\begin{tikzpicture}[font=\small]
+\begin{tikzpicture}[font=\small,>=stealth]
 
 % =========================
 % Styles (ALL IN ONE BLOCK)
 % =========================
 \tikzset{
-    tensor/.style={
-        draw,
-        thick,
-        rounded corners=2pt,
-        top color=#1!20,
-        bottom color=#1!60,
-        shading angle=45
-    },
-    depth/.style={
-        draw,
-        thick,
-        fill=#1!40,
-        opacity=0.85
-    },
-    kernel3d/.style={
-        draw,
-        thick,
-        left color=gray!20,
-        right color=gray!60
-    },
-    cell/.style={
-        draw,
-        thick,
-        fill=gray!12
-    },
-    diag/.style={
-        draw,
-        thick,
-        fill=red!65,
-        drop shadow
-    },
-    arrow/.style={
-        ->,
-        thick,
-        color=blue!70
-    }
+    tensor/.style={draw, thick, rounded corners=2pt, top color=#1!20, bottom color=#1!60, shading angle=45},
+    depth/.style={draw, thick, fill=#1!40, opacity=0.85},
+    kernel3d/.style={draw, thick, left color=gray!20, right color=gray!60},
+    cell/.style={draw, thick, fill=gray!12},
+    diag/.style={draw, thick, fill=red!65, drop shadow},
+    arrow/.style={->, thick, color=blue!70}
 }
 
 % =========================
 % Original Input Tensor (H x W, C=1)
 % =========================
 \node[tensor=blue, minimum height=2.2cm, minimum width=4.2cm] (orig) at (0,0) {};
-%\node[depth=blue, minimum height=2.2cm, minimum width=4.2cm] at (0.15,0.15) {};
-\node[above=4pt of orig] {Input tensor};
-\node[below=4pt of orig] {$H \times W,\; C_{in}=1$};
+\node[above=4pt of orig] {\parbox{2.5cm}{\centering Input tensor}};
+\node[below=4pt of orig] {\parbox{2.5cm}{\centering $H \times W,\; C_{in}=1$}};
 
 % =========================
 % Width Folding Arrow
 % =========================
 \draw[arrow] (orig.east) to[out=0,in=180] ++(1.6,0)
-node[midway,above] {Width folding ($F=8$)};
+    node[midway,above]{\parbox{2.5cm}{\centering Width folding ($F=8$)}};
 
 % =========================
 % Folded Input (Channel Depth = 8)
 % =========================
 \begin{scope}[shift={(6,0)}]
-    \foreach \i/\c in {
-        0/red,
-        1/orange,
-        2/yellow,
-        3/green,
-        4/cyan,
-        5/blue,
-        6/purple,
-        7/magenta
-    } {
-        \node[depth=\c, minimum height=2.2cm, minimum width=0.6cm]
-        at (\i*0.18, \i*0.18) {};
+    \foreach \i/\c in {0/red,1/orange,2/yellow,3/green,4/cyan,5/blue,6/purple,7/magenta} {
+        \node[depth=\c, minimum height=2.2cm, minimum width=0.6cm] at (\i*0.18,\i*0.18) {};
     }
-
-    \node at (1.6,1.9) {Folded input};
-    \node at (1.6,-1.5) {$H \times (W/8)$};
-    \node at (1.6,-2.1) {$C_{in}' = 8$};
-    \node[align=center] at (1.6,-2.8)
-        {\scriptsize Channels stacked in depth};
+    \node at (1.6,1.9) {\parbox{3cm}{\centering Folded input}};
+    \node at (1.6,-1.5) {\parbox{3cm}{\centering $H \times (W/8)$}};
+    \node at (1.6,-2.1) {\parbox{3cm}{\centering $C_{in}' = 8$}};
+    \node[align=center] at (1.6,-2.8) {\scriptsize\parbox{3cm}{\centering Channels stacked in depth}};
 \end{scope}
 
 % =========================
@@ -357,15 +317,15 @@ node[midway,above] {Width folding ($F=8$)};
 % =========================
 \begin{scope}[shift={(0,-4.8)}]
     \node[kernel3d, minimum width=0.45cm, minimum height=2.2cm] (filt) at (0,0) {};
-    \node[above=4pt of filt] {Original filter};
-    \node[below=4pt of filt] {$K \times 1$};
+    \node[above=4pt of filt] {\parbox{2.5cm}{\centering Original filter}};
+    \node[below=4pt of filt] {\parbox{2.5cm}{\centering $K \times 1$}};
 \end{scope}
 
 % =========================
 % Filter Expansion Arrow
 % =========================
 \draw[arrow] (1.1,-4.8) to[out=0,in=180] (2.6,-4.8)
-node[0.5,above] {Channel expansion};
+    node[midway,above]{\parbox{2.5cm}{\centering Channel expansion}};
 
 % =========================
 % Expanded Diagonal Filter (8 x 8)
@@ -375,8 +335,7 @@ node[0.5,above] {Channel expansion};
     \begin{scope}[opacity=0.15]
         \foreach \i in {0,...,7} {
             \foreach \j in {0,...,7} {
-                \node[cell, fill=black]
-                at (\j*0.5+0.08, \i*0.5+0.08) {};
+                \node[cell, fill=black] at (\j*0.5+0.08, \i*0.5+0.08) {};
             }
         }
     \end{scope}
@@ -385,19 +344,19 @@ node[0.5,above] {Channel expansion};
     \foreach \i in {0,...,7} {
         \foreach \j in {0,...,7} {
             \ifnum\j=\i
-                \node[cell,diag] at (\j*0.5, \i*0.5) {};
+                \node[cell,diag] at (\j*0.5,\i*0.5) {};
             \else
-                \node[cell] at (\j*0.5, \i*0.5) {};
+                \node[cell] at (\j*0.5,\i*0.5) {};
             \fi
         }
     }
 
-    \node at (1.75,4.3) {Expanded filter};
-    \node at (1.75,-1.1) {Diagonal replication};
-    \node at (1.75,-1.7) {$C_{in}' = 8$};
+    \node at (1.75,4.3) {\parbox{3cm}{\centering Expanded filter}};
+    \node at (1.75,-1.1) {\parbox{3cm}{\centering Diagonal replication}};
+    \node at (1.75,-1.7) {\parbox{3cm}{\centering $C_{in}' = 8$}};
 \end{scope}
 
-\end{tikzpicture}
+\end{tikzpicture}%
 }
 \caption{
 Semantic-preserving CNN reformulation via width folding.
@@ -407,7 +366,6 @@ This post-training transformation preserves exact convolution semantics while al
 }
 \label{fig:full-width-folding}
 \end{figure}
-
 
 %\clearpage       % start on a fresh page
 %\onecolumn
@@ -735,20 +693,20 @@ $\mathcal{Y} \in \mathbb{R}^{B \times H' \times W' \times C_{\text{out}}}$.
 The \emph{width-folding} transformation reshapes the input tensor along the width dimension.
 F (folding factor) is chosen to align with Tensor core tile sizes.
 
-\begin{equation}{\columnwidth}
+\begin{equation}
 \mathcal{X}_f \in \mathbb{R}^{B \times H \times \frac{W}{F} \times (C_{\text{in}} \cdot F)}, \quad
 F \in \mathbb{Z}^+ 
 \end{equation}
 
 The kernel is correspondingly transformed into a diagonal-blocked form:
 
-\begin{equation}{\columnwidth}
+\begin{equation}
 \mathcal{K}_f \in \mathbb{R}^{K_H \times \frac{K_W}{F} \times (C_{\text{in}} \cdot F) \times (C_{\text{out}} \cdot F)}.
 \end{equation}
 
 The transformed convolution preserves the original semantics:
 
-\begin{equation}{\columnwidth}
+\begin{equation}
 \mathcal{Y} = \text{Conv}(\mathcal{X}, \mathcal{K}) = \text{Reconstruct}\big(\text{Conv}(\mathcal{X}_f, \mathcal{K}_f)\big),
 \end{equation}
 
@@ -953,10 +911,8 @@ achieving performance portability.
 % -----------------------------
 \section{Example Code using Tensorflow CNN (Channels-Last)}
 \label{app:reference}
-This Tensorflow implementation demonstrates a 2-D block-diagonal filter transformation where the input is in **channels-last format** (`[B, H, W, C_in]`), the W dimension is folded, and the convolution is compatible with NVIDIA Tensor Cores.
+This Tensorflow implementation demonstrates a 2-D block-diagonal filter transformation where the input is in channels-last format ($[B, H, W, C_in]$), the W dimension is folded, and the convolution is compatible with NVIDIA Tensor Cores.
 
-\usepackage{listings}
-\usepackage{xcolor}
 
 \lstset{
     language=Python,
@@ -1065,7 +1021,7 @@ print("Max absolute error:", max_error.numpy())
 
 # Assert correctness
 tf.debugging.assert_near(np.squeeze(y_orig, axis=-1), y_reconstructed, atol=1e-5)
-print("✔ Width folding transformation is numerically correct")
+print("Width folding transformation is numerically correct")
 \end{lstlisting}
 
 \end{document}
