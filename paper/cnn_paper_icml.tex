@@ -62,7 +62,7 @@
 
 
 % Attempt to make hyperref and algorithmic work together better:
-\newcommand{\theHalgorithm}{\arabic{algorithm}}
+%\newcommand{\theHalgorithm}{\arabic{algorithm}}
 
 % Use the following line for the initial blind version submitted for review:
 %\usepackage{icml2026}
@@ -557,6 +557,7 @@ reassociating the tensor factors without changing the underlying morphism. Thus,
 Overall, width folding unifies perspectives from tensor reshaping, contraction, block-diagonal / Kronecker structures, and categorical isomorphisms, providing a concise mathematical framework for this hardware-oriented optimization.
 
 \section{Correctness of Width Folding Transformation}
+\label{sec:correctness}
 
 We consider a 1-D convolution performed exclusively along the height
 dimension \(H\).
