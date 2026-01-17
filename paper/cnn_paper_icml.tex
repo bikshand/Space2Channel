@@ -16,6 +16,8 @@
 \usepackage{placeins}
 \usepackage{algorithm}
 \usepackage{algorithmic}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
 
 
 \usepackage{tcolorbox}   % for boxed listings
@@ -792,12 +794,65 @@ Structured sparsity pairs naturally with mixed-precision quantization (FP16/INT8
 
 
 \section{Results}
-We implemented the proposed widthfolding transformation in both TensorFlow and TensorRT, validating it against functionally equivalent convolution operations. All experiments and ablation studies were conducted on NVIDIA A100 GPUs using proprietary CNN models. Due to intellectual property and data-sharing constraints, detailed experimental configurations, model architectures, and raw performance measurements cannot be publicly disclosed.
+We implemented the proposed widthfolding transformation in both TensorFlow and TensorRT, validating it against functionally equivalent convolution operations. Our initial experiments and ablation studies were conducted on NVIDIA A100 GPUs using proprietary CNN models. Due to intellectual property and data-sharing constraints, detailed experimental configurations, model architectures, and raw performance measurements cannot be publicly disclosed.
 However, a reference implementation in Python using TensorFlow API is provided in Appendix~\ref{app:reference}, allowing reproducibility of the transformation on synthetic or publicly available models. 
 
 To provide context for performance, the complete set of empirical results is summarized in the accompanying patent application ~\cite{roche_pct}. These results demonstrate a minimum of 3× improvement over baseline implementations (vanilla TensorRT C++ API~\cite{tensorrt}) on A100-class hardware. The observed gains are primarily attributable to alignment-aware reformulation of convolution operations, which improves Tensor Core utilization compared to conventional zero-padding strategies.
 
-FP16 precision was used in all experiments. It should be noted that TensorRT does not natively support Tensor Core operations with FP16 input when the number of input channels is not a multiple of eight. It was using a sub-optimal convolution kernel for this case. While H100 and B-series GPUs were unavailable during experimentation, the method is expected to generalize to newer architectures (H200/H800/B200), and re-evaluation on these platforms is planned contingent on hardware access. Importantly, TensorRT is already highly optimized; achieving 3× performance improvement indicates a fundamentally new algorithmic approach, improved hardware utilization, and domain-specific optimization beyond generic kernels.
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+ybar,
+bar width=18pt,
+width=0.9\columnwidth,
+height=0.6\columnwidth,
+ymin=0,
+ylabel={Execution Time (ms)},
+symbolic x coords={1x1,3x1},
+xtick=data,
+legend style={at={(0.5,1.08)},anchor=south,legend columns=2},
+scaled y ticks=false,
+yticklabel style={/pgf/number format/fixed,/pgf/number format/precision=4},
+enlarge x limits=0.25
+]
+
+% Reference bars (gray)
+\addplot[
+bar shift=-10pt,
+fill=gray!60,
+draw=black
+] coordinates {
+(1x1,0.0114)
+(3x1,0.0120)
+};
+
+% Width-folded bars (blue)
+\addplot[
+bar shift=10pt,
+fill=blue!60,
+draw=black
+] coordinates {
+(1x1,0.0043)
+(3x1,0.0051)
+};
+
+% Speedup annotations
+\node at (axis cs:1x1,0.0049) {\small 2.65$\times$};
+\node at (axis cs:3x1,0.0058) {\small 2.35$\times$};
+
+\legend{Reference,Width-Folded}
+
+\end{axis}
+\end{tikzpicture}
+\caption{Execution time comparison of reference and width-folded convolution. Speedup over reference is annotated above width-folded bars.}
+\label{fig:grouped-time-speedup}
+\end{figure}
+
+
+We reproduced the results on a \textbf{NVIDIA RTX PRO 5000 Blackwell} GPU with \textbf{CUDA 13.1} and \textbf{TensorRT 1.3.0.35}, using input feature maps of size $H=64$ and $W=1024$. Figure~\ref{fig:grouped-time-speedup} shows the execution time of the reference convolution versus the proposed width-folded implementation. For \mbox{1$\times$1} filters, width folding reduces execution time from \textbf{0.0114 ms} to \textbf{0.0043 ms}, achieving a \textbf{2.65$\times$ speedup}. For \mbox{3$\times$1} filters, execution time drops from \textbf{0.0120 ms} to \textbf{0.0051 ms}, a \textbf{2.35$\times$ speedup}. These results demonstrate that width folding significantly reduces computation and memory overhead while maintaining the original convolution semantics, with consistent performance gains across filter sizes.
+
+FP16 precision was used in all experiments. It was discovered that TensorRT was using a sub-optimal convolution kernel for this case, with a reformating before and after the convolution that leads to the slowdown. TensorRT is already highly optimized; achieving 3× performance improvement indicates a fundamentally new algorithmic approach, improved hardware utilization, and domain-specific optimization beyond generic kernels.
 
 Although cuDNN ~\cite{chetlur2014cudnn}, another popular deep learning framework, exposes FP16 convolution at the API level, convolutions with very small input channel counts—most notably $C_{\text{in}} = 1$—are not allowed by default due to reason that tensor Cores require matrix dimensions that are multiples of 8. For such cases, the responsibility is pushed to the user rather than the library and users must explicitly pad the channel dimension with zeros or use FP32 variant. Zero padding increases memory traffic and performs wasted computation on artificial data, while falling back to FP32 introduces FP16--FP32--FP16 conversion overhead and executes on CUDA cores (not Tensor cores). In both cases, Tensor Cores remain underutilized, despite their theoretical ability to provide up to an $8\times$ throughput improvement for FP16 operations.
 
