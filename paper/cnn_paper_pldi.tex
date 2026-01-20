@@ -18,6 +18,8 @@
 \usepackage{algorithmic}
 \usepackage{pgfplots}
 \pgfplotsset{compat=1.18}
+\usepackage{subcaption} % For subfigures
+\usepackage{epstopdf}   % EPS support in pdflatex
 
 
 \usepackage{tcolorbox}   % for boxed listings
@@ -144,20 +146,91 @@
 \printAffiliationsAndNotice{}  % no special notice (required even if empty)
 
 \begin{abstract}
-	Convolutional Neural Networks (CNNs) are central to modern AI, but their performance is often limited by hardware constraints. NVIDIA Tensor Cores, for instance, require input channels to be multiples of 8 and sometimes 512 for efficient execution. {\em oneDNN} framework for CPU imposes such a requirement for the blocked format. Traditional approaches address such alignment issue using zero-padding, which can be inefficient. In this work, we present a first-step, hardware-aware reformulation of CNN computations using rewrite rules, restructuring the underlying math to satisfy hardware alignment entirely {\bf post-training} without modifying network weights. While our current implementation focuses on a single transformation for Tensor Cores, this approach is generalizable, laying the foundation to explore additional transformations for CPU and accelerators. This study represents an initial step toward {\em semantic tuning}, a systematic, hardware-aware optimization strategy for efficient deployment of CNN models on specialized AI hardware.
+Modern accelerators impose strict alignment and layout constraints on tensor
+dimensions to achieve peak performance. When these constraints are violated,
+inference compilers such as TensorRT compensate by inserting padding and layout
+reformatting operations around convolution kernels, increasing memory traffic
+and execution latency. These overheads arise not from the semantics of
+convolution itself, but from a mismatch between logical tensor structure and
+hardware-preferred layouts.
+
+This paper introduces \emph{space folding}, a
+\emph{semantics-preserving tensor reshape transformation} that rewrites
+convolutional programs to satisfy hardware alignment constraints by
+construction. Space folding systematically re-associates spatial dimensions
+into the channel dimension and applies a corresponding structured
+transformation to convolution filters. 
+
+	We formalize space folding as a {\bf post-training} tensor re-indexing transformation,
+prove its correctness with respect to standard convolution semantics, and show
+how it naturally manifests as a compiler intermediate-representation rewrite.
+We implement space folding in TensorRT and evaluate it on an NVIDIA RTX PRO 5000
+Blackwell GPU. Across representative convolution workloads, space folding
+achieves up to $2.65\times$ speedup.
+
+Our results demonstrate that semantic tensor reshaping is a powerful and
+underexplored optimization space for machine learning compilers, and motivate
+the integration of space-folding-style transformations into IR-based frameworks
+such as MLIR and oneDNN.
 \end{abstract}
 
 \section{Introduction}
 
-Convolutional Neural Networks (CNNs) are a foundational building block of modern deep learning systems, underpinning applications ranging from computer vision to speech and scientific computing. At a high level, CNNs apply learnable filters to structured input tensors in order to extract hierarchical feature representations. For a standard convolution, the input tensor has shape $(N, C_{\text{in}}, H[, W, D])$, the filter weights have shape $(C_{\text{out}}, C_{\text{in}}, K_1[, K_2, \ldots, K_n])$, and the resulting output tensor has shape $(N, C_{\text{out}}, H_{\text{out}}[, W_{\text{out}}, D_{\text{out}])}$. This formulation uses the NCHW layout; alternate layout is NHWC.
+The performance of modern machine learning workloads is increasingly dominated
+by how well tensor programs align with the structural constraints of underlying
+hardware accelerators. Contemporary GPUs, CPUs, and AI accelerators expose
+vectorized execution units, tensor cores, and fixed blocking requirements that
+demand specific tensor shapes and layouts to achieve peak throughput. When these
+requirements are not met, performance can degrade sharply, even when the
+underlying computation is theoretically efficient.
 
-While this mathematical formulation is hardware-agnostic, the efficient execution of CNNs on modern AI accelerators is strongly influenced by hardware-specific constraints. Specialized units such as NVIDIA Tensor Cores and analogous matrix-multiply engines in other accelerators impose alignment and tiling requirements on tensor dimensions, most notably that certain dimensions (e.g., channel counts) be multiples of fixed factors such as eight or a higher count like 512~\cite{nvidia_cnn}. Also, {\em oneDNN} framework~\cite{onednn2025} for CPU imposes such an alignment requirement for the blocked format. When these constraints are not satisfied, libraries either fall back to less efficient execution paths or require auxiliary modifications such as zero padding, which introduce redundant computation and memory overhead.
+Convolutional neural networks (CNNs) illustrate this tension clearly. At the
+semantic level, convolution is defined independently of tensor layout, blocking
+factors, or alignment constraints. In practice, however, high-performance
+convolution kernels require channel dimensions to be multiples of fixed factors
+(e.g., eight or more) and often assume specific memory layouts. When user-level
+tensor shapes violate these assumptions, inference compilers such as TensorRT
+insert padding and layout reformatting operations before and after convolution
+kernels to reconcile the mismatch.
 
-It is possible to address these constraints during network design or training, for example by manually increasing the channels or retraining models with $1\times1$ convolution. In contrast, this paper explores a complementary and largely underexplored direction: post-training reformulation of CNN computations. Rather than modifying the network architecture or retraining weights, we rewrite the underlying convolutional mathematics to produce an equivalent formulation that satisfies hardware alignment and channel count requirements by construction.
+While effective for correctness, these runtime adaptations introduce additional
+memory traffic, kernel launches, and synchronization points. Crucially, the
+resulting overheads are not inherent to the semantics of convolution, but rather
+emerge from a mismatch between the logical structure of tensor programs and the
+requirements of hardware-efficient implementations.
 
-Specifically, we present an initial hardware-aware transformation that reshapes and reinterprets the convolutional computation—through {\bf width folding for input in NHWC format (alternatively height folding for NCHW format)} and {\bf structured filter expansion} — so that the resulting tensors conform to accelerator alignment constraints while preserving exact numerical equivalence to the original CNN. This transformation eliminates the need for zero padding and does not alter the learned parameters or outputs of the network. Although the paper focuses on a single transformation motivated by NVIDIA Tensor Core constraints, the broader goal is to establish a foundation for a family of such rewrite rules that can be systematically derived and applied across different accelerator architectures.
+This paper argues that many of these overheads can be eliminated by addressing
+the mismatch at the \emph{semantic level}, rather than at kernel execution time.
+We introduce \emph{space folding}, a semantics-preserving tensor reshape
+transformation that rewrites convolutional programs after training to satisfy
+hardware alignment constraints by construction. Space folding systematically
+re-associates spatial dimensions into the channel dimension and applies a
+corresponding structured transformation to convolution filters. The transformed
+program is mathematically equivalent to the original and requires no retraining
+or approximation.
 
-Viewed through this lens, CNN execution can be treated as a compilation problem, where mathematically equivalent reformulations are selected to best match the capabilities and constraints of the target hardware. This work represents a first step toward such a hardware-aware compilation framework for CNNs, demonstrating that non-trivial accelerator constraints can be addressed purely through post-training mathematical rewrites.
+From a programming languages perspective, space folding is a
+\emph{program transformation over tensor computations}. It changes the apparent
+shape and structure of tensors while preserving the denotation of the program.
+Unlike scheduling optimizations, autotuning, or kernel fusion, space folding
+operates purely through tensor re-indexing and reshape operations, making it
+amenable to formal reasoning and compiler integration.
+
+We demonstrate the practical impact of space folding through an implementation
+in TensorRT. TensorRT supports a variety of internal tensor layouts, such as
+\texttt{kHWC8}, that are optimized for Tensor Core execution. When tensors do not
+naturally conform to these layouts, TensorRT inserts implicit reformatting
+kernels before and after convolution. Space folding avoids these conversions
+entirely by rewriting tensor shapes so that hardware-preferred layouts arise
+naturally. On an NVIDIA RTX PRO 5000 Blackwell GPU, space folding achieves up to
+$2.65\times$ speedup across representative convolution workloads.
+
+Beyond these immediate performance gains, space folding exposes a broader
+compiler opportunity. It demonstrates that semantic tensor reshaping constitutes
+a powerful and underexplored optimization space, complementary to traditional
+lowering, scheduling, and kernel-level techniques. By making hardware alignment
+an explicit property of tensor programs, space folding enables compilers to
+generate efficient code without relying on padding or runtime layout conversion.
 
 \begin{table}[h!]
 \centering
@@ -178,20 +251,68 @@ MobileNetV2 & 3 \\
 \end{tabularx}
 \end{table}
 
-To motivate the need for hardware-aware filter alignment, we survey several widely used CNN architectures and their first-layer channel dimensions.  As shown in Table~\ref{tab:firstlayer}, most models processing RGB images have an input channel count of 3, which is not a multiple of 8, limiting the efficiency on NVIDIA Tensor Cores. Furthermore, many models have a first-layer filter count below 512, which is the recommended number mentioned in NVIDIA~\cite{nvidia_cnn}. In such cases, our method can also increase the channel dimensions, ensuring better alignment with hardware requirements while preserving network functionality.
+To further motivate the need for hardware-aware filter alignment, we survey several widely used CNN architectures and their first-layer channel dimensions.  As shown in Table~\ref{tab:firstlayer}, most models processing RGB images have an input channel count of 3, which is not a multiple of 8 or 4. For such cases, TensorRT will introduce reformat to \texttt{CHW4} or \texttt{kHWC8} format and then execute on tensor core. Reformat operations consume memory bandwidth and are wasteful of compute cycles.
 
-The paper makes the following contributions:
 
-The paper makes the following contributions:
 
+\begin{figure}[t]
+    \centering
+    % --------------------------
+    % (a) Cin sweep
+    % --------------------------
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sensitivity_cin.eps}
+        \caption{Input Channels (Cin)}
+        \label{fig:cin_sensitivity}
+    \end{subfigure}
+    \hfill
+    % --------------------------
+    % (b) Cout sweep
+    % --------------------------
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sensitivity_cout.eps}
+        \caption{Output Channels (Cout)}
+        \label{fig:cout_sensitivity}
+    \end{subfigure}
+    \hfill
+
+    \caption{
+    Sensitivity analysis of TensorRT convolution on NVIDIA Blackwell RTX PRO 3000.
+    (a) Varying input channels (Cin) with Cout=8.
+    (b) Varying output channels (Cout) with Cin=8.
+    }
+    \label{fig:sensitivity_all}
+\end{figure}
+
+We conducted sensitivity studies using TensorRT by varying the number of output channels ($C_\mathrm{out}$) from 2 to 32 in steps of 2 while keeping the number of input channels fixed at $C_\mathrm{in}=64$, and observed that configurations where $C_\mathrm{out}$ is a multiple of 4 or 8 consistently achieve lower execution time than other cases. Likewise, when varying the number of input channels ($C_\mathrm{in}$) from 2 to 32 in steps of 2 while keeping the number of output channels fixed at $C_\mathrm{out}=8$, we observe similiar pattern, which we attribute to TensorRT’s kernel selection favoring convolution filter dimensions that are multiples of 4 or 8. These experiments were conducted on NVIDIA Blackwell GPUs~\cite{nvidia_blackwell}. Overall, these results highlight the impact of using TensorRT together with architecture-specific alignment and kernel selection constraints on convolution performance.
+
+\paragraph{Contributions.}
+This paper makes the following contributions:
 \begin{itemize}
-  \item Introduce \emph{semantic reformulation} as a hardware-aware optimization paradigm.
-  \item Present \emph{width folding}, a semantics-preserving transformation that increases effective channel dimensionality without padding.
-  \item Provide a formal correctness proof.
-  \item Show how the transformation fits naturally as an MLIR compiler pass.
-  \item Demonstrate generalization to GEMM via $1\times1$ convolutions.
-  \item Report up to $3\times$ speedups over cuDNN/TensorRT on NVIDIA A100 and B100.
+  \item We introduce \emph{space folding}, a semantics-preserving tensor reshape
+  transformation that re-associates spatial dimensions into channels to satisfy
+  hardware alignment constraints.
+  \item We formalize space folding as an invertible tensor re-indexing
+  transformation and prove its correctness with respect to standard convolution
+  semantics.
+  \item We show how space folding naturally manifests as a compiler
+  intermediate-representation rewrite, independent of specific kernel
+  implementations.
+  \item We implement space folding in TensorRT and demonstrate significant
+  performance improvements by eliminating implicit layout reformatting.
 \end{itemize}
+
+The remainder of the paper is organized as follows. 
+Section~\ref{sec:spacefolding} formalizes the space folding transformation and
+its correctness. Section~\ref{sec:math} describes the mathematical
+perspective of space folding, and Section~\ref{sec:correctness}  shows
+the mathematical correctness of the transformation.
+Section~\ref{sec:evaluation} presents experimental results.
+Finally, we discuss related work in Section ~\ref{sec:related}
+and future directions in ~\ref{sec:discussion}.
+
 
 
 \begin{figure}[h!]
@@ -426,11 +547,17 @@ Transformed tensors $(X_f, W_f', b')$ or fallback
 \end{figure}
 
 \section{Width Folding Transformation}
+\label{sec:spacefolding}
 
-This section describes the width folding transformation, a post-training,
-semantics-preserving reformulation that increases the effective channel
-dimension to satisfy hardware alignment constraints while leaving the learned
-model parameters unchanged.
+For clarity of exposition, the remainder of this paper focuses on
+\emph{width folding}, i.e., applying space folding along the width dimension of
+convolutional tensors. In a standard convolution, input tensors are structured
+as $N \times H \times W \times C$, where $N$ denotes batch size, $H$ height, $W$
+width, and $C$ channels. Width folding re-associates the $W$ dimension into the
+channel dimension. This choice is made purely for presentation simplicity and
+does not restrict the generality of the technique. Space folding applies
+equally to the height dimension, or to combinations of spatial dimensions,
+whenever the convolution semantics do not mix values across the folded axis.
 
 Given an input tensor
 \[
@@ -530,6 +657,7 @@ width folded convolution is presented in ~\ref{alg:width-folding}.
 
 
 \section{Width Folding: Mathematical Perspective}
+\label{sec:math}
 
 Width folding is a structural transformation of convolutional tensors that trades spatial width for additional channels. Given an input tensor 
 $X \in \mathbb{R}^{B \times H \times W \times C_{\text{in}}}$ 
@@ -791,12 +919,13 @@ Structured sparsity pairs naturally with mixed-precision quantization (FP16/INT8
 %\twocolumn
 
 \section{Results}
+\label{sec:evaluation}
 
-We implemented the width-folding transformation in TensorFlow and TensorRT, validating it against functionally equivalent convolutions. To ensure reproducibility, we provide synthetic benchmarks on small-scale models, shown in Figure~\ref{fig:perf}. These experiments demonstrate that width folding consistently accelerates convolution operations, achieving up to 2.65$\times$ speedup over standard TensorRT execution.
+We implemented the width-folding transformation in TensorFlow and TensorRT, validating it against functionally equivalent convolutions. Since TensorRT does not provide a programmable transformation IR, space folding is lowered \emph{by hand} by explicitly constructing an equivalent TensorRT graph. The lowering materializes the folded layout via reshaping spatial dimensions and replicating convolution filters to preserve receptive-field semantics. All semantic correctness is established at the IR level prior to lowering; TensorRT is used only for kernel selection, layout specialization, and execution. At this time, we did not explore MLIR-based lowering to TensorRT; investigating a principled MLIR lowering pipeline is left as future work. A representative TensorRT implementation is provided in Appendix~B.
 
-We executed the results on a \textbf{NVIDIA RTX PRO 5000 Blackwell} GPU with \textbf{CUDA 13.1} and \textbf{TensorRT 1.3.0.35}, using input feature maps of size $H=64$ and $W=1024$. Figure~\ref{fig:perf} shows the execution time of the reference convolution versus the proposed width-folded implementation. For \mbox{1$\times$1} filters, width folding reduces execution time from \textbf{0.0114 ms} to \textbf{0.0043 ms}, achieving a \textbf{2.65$\times$ speedup}. For \mbox{3$\times$1} filters, execution time drops from \textbf{0.0120 ms} to \textbf{0.0051 ms}, a \textbf{2.35$\times$ speedup}. These results demonstrate that width folding significantly reduces computation and memory overhead while maintaining the original convolution semantics, with consistent performance gains across filter sizes.  FP16 precision was used in all experiments. 
+We executed our experiments on a \textbf{NVIDIA RTX PRO 5000 Blackwell} GPU with \textbf{CUDA 13.1} and \textbf{TensorRT 1.3.0.35}, using input feature maps of size $H=64$ and $W=1024$. Figure~\ref{fig:perf} shows the execution time of the reference convolution versus the proposed width-folded implementation. For \mbox{1$\times$1} filters, width folding reduces execution time from \textbf{0.0114 ms} to \textbf{0.0043 ms}, achieving a \textbf{2.65$\times$ speedup}. For \mbox{3$\times$1} filters, execution time drops from \textbf{0.0120 ms} to \textbf{0.0051 ms}, a \textbf{2.35$\times$ speedup}. These results demonstrate that width folding significantly reduces computation and memory overhead while maintaining the original convolution semantics, with consistent performance gains across filter sizes.  FP16 precision was used in all experiments. 
 
-TensorRT is already highly optimized; achieving 3× performance improvement indicates a fundamentally new algorithmic approach, improved hardware utilization, and domain-specific optimization beyond generic kernels.  The primary source of performance improvement is the avoidance of tensor reformatting overhead. Vanilla TensorRT often inserts implicit layout transformations before and after convolution to satisfy hardware alignment constraints,  which adds memory traffic and computational cost. TensorRT supports several input/output formats, including \texttt{kHWC8}, where the last dimension (channels) is padded to a multiple of 8. The 'k' prefix indicates a blocked format suitable for Tensor Cores, and 'HWC8' signifies that 8 channels are stored contiguously. Width folding directly produces tensors in this aligned format without additional runtime reordering, eliminating memory-bound operations and reducing latency.
+TensorRT is already highly optimized; achieving 3× performance improvement indicates a fundamentally new algorithmic approach, improved hardware utilization, and domain-specific optimization beyond generic kernels.  The primary source of performance improvement is the avoidance of tensor reformatting overhead. Vanilla TensorRT often inserts implicit layout transformations before and after convolution to satisfy hardware alignment constraints,  which adds memory traffic and computational cost. TensorRT supports several input/output formats, including \texttt{kHWC8}, where the last dimension (channels) is padded to a multiple of 8. The 'k' prefix indicates a blocked format suitable for Tensor Cores, and 'HWC8' signifies that 8 channels are stored contiguously. Another format is \texttt{CHW4}. Width folding directly produces tensors in this aligned format without additional runtime reordering, eliminating memory-bound operations and reducing latency.
 
 
 \begin{figure}[t]
@@ -851,8 +980,9 @@ Speedups over TensorRT are annotated above the blue bars. Width folding avoids p
 \end{figure}
 
 
-In addition to synthetic tests, industrial experiments conducted on a wide range of real-world CNNs (as reported in~\cite{roche_pct}) consistently demonstrate a minimum of 3$\times$ speedups on NVIDIA A100 GPUs. 
-\texttt{cuDNN} ~\cite{chetlur2014cudnn}, another popular deep learning framework, exposes FP16 convolution at the API level. However, convolutions with very small input channel counts—most notably $C_{\text{in}} = 1$—are not allowed by default due to reason that tensor Cores require matrix dimensions that are multiples of 8. For such cases, the responsibility is pushed to the user rather than the library and users must explicitly pad the channel dimension with zeros or use FP32 variant. Zero padding increases memory traffic and performs wasted computation on artificial data, while falling back to FP32 introduces FP16--FP32--FP16 conversion overhead and executes on CUDA cores (not Tensor cores). In both cases, Tensor Cores remain underutilized, despite their theoretical ability to provide up to an $8\times$ throughput improvement for FP16 operations.
+Using trtexec (an measurement tool provided as part of TensorRT), we observed that the reference engine allocates 393,216 bytes of workspace during execution, whereas the width-folded engine requires zero scratch memory. This confirms that the memory reduction arises from space folding optimization. We hypothesize that the reference formulation introduces explicit padding along the width dimension, which forces TensorRT to select tactics that require temporary workspace. In contrast, width folding removes the padded dimension from the problem geometry, enabling a direct convolution kernel that requires no scratch memory during execution.
+
+In addition to synthetic tests, industrial experiments conducted on a wide range of real-world CNNs (as reported in~\cite{roche_pct}) consistently demonstrate a minimum of 3$\times$ speedups on NVIDIA A100 GPUs, for first layers of CNN networks.  \texttt{cuDNN} ~\cite{chetlur2014cudnn}, another popular deep learning framework, exposes FP16 convolution at the API level. However, convolutions with very small input channel counts—most notably $C_{\text{in}} = 1$—are not allowed by default due to reason that tensor Cores require matrix dimensions that are multiples of 8. For such cases, the responsibility is pushed to the user rather than the library and users must explicitly pad the channel dimension with zeros or use FP32 variant. Zero padding increases memory traffic and performs wasted computation on artificial data, while falling back to FP32 introduces FP16--FP32--FP16 conversion overhead and executes on CUDA cores (not Tensor cores). In both cases, Tensor Cores remain underutilized, despite their theoretical ability to provide up to an $8\times$ throughput improvement for FP16 operations.
 
 The above facts reflect the design philosophy of TensorRT and cuDNN as a general-purpose kernel library rather than a system that invents new mathematical formulations. They faithfully implement the operation given; they do not reinterpret tensor dimensions or apply semantics-changing transformations to satisfy hardware alignment requirements. In contrast, our approach introduces a semantics-preserving mathematical transformation that increases the effective channel dimension without zero padding or precision up/down-conversion. This reparameterization makes the convolution natively compatible with FP16 Tensor Core kernels, enabling high utilization and substantially higher performance than existing cuDNN or TensorRT implementations for low-channel-count convolutions.
 
@@ -862,6 +992,8 @@ The proposed method applies to any convolutional layer, not just the first layer
 The observed results are consistent with publicly available NVIDIA documentation~\cite{nvidia_cnn} , providing further confidence in the correctness and potential impact of the method. Finally, this transformation can be applied even during tranining process to realize similar speedups and tensorcore utilization.
 
 \section{Related Work}
+\label{sec:related}
+
 Optimizing CNNs for hardware accelerators has been an active area of research. Our approach draws inspiration from several exising techniques, combining channel expansion and block-diagonal sparsity to fully exploit hardware throughput. 
 
 \subsection{Relation to Other CNN Variants}
@@ -921,6 +1053,7 @@ compilers can further optimize.
 
 
 \section{Conclusion}
+\label{sec:discussion}
 We presented a transformation for CNN filters that aligns input and output channels with NVIDIA Tensor Core requirements. The method maintains the original filter structure, generalizes to n-D convolutions, and exploits sparsity for memory and computational efficiency. This approach bridges hardware-aware optimizations with traditional CNN design principles, providing a practical and scalable solution for high-performance deep learning deployments.
 
 \subsection{Future Work}
@@ -941,7 +1074,7 @@ GPUs, where wavefront sizes, memory coalescing rules, and matrix
 instruction formats differ substantially. Developing a unified
 transformation framework that adapts this idea to multiple
 specialized hardware as well as general-purpose CPU (e.g. alignment
-requirement for SIMD or cache usage ~\cite{onednn2025}) 
+requirement for SIMD or block formats ~\cite{onednn2025}) 
 remains an open and important problem.
 
 Third, we aim to extend these techniques to other operators commonly
@@ -956,7 +1089,7 @@ optimization toward \emph{semantically equivalent operator transformations},
 achieving performance portability.
 
 \FloatBarrier
-\bibliography{cnn_paper_icml}
+\bibliography{cnn_paper_pldi}
 \bibliographystyle{icml2026}
 
 \newpage
